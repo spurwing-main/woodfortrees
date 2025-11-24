@@ -47,8 +47,8 @@ export function init() {
         ease: "easeOut",
     };
 
-    const AUTO_MIN = 2200;
-    const AUTO_MAX = 3200;
+    const AUTO_MIN = 600;    // reduced from 2200 (faster swapping)
+    const AUTO_MAX = 1200;    // reduced from 3200 (faster swapping)
 
     /* ---------------------------------------------------------
        SLOT MODEL
@@ -278,11 +278,11 @@ export function init() {
         }
 
         const free = slots.filter((s) => !s.busy && s.id !== null);
-
+        
         // Exclude the last auto-swapped slot to prevent immediate repeats
         const candidates = free.filter((s) => s !== lastAutoSlot);
         const pool = candidates.length ? candidates : free;
-
+        
         if (pool.length) {
             const selected = rand(pool);
             lastAutoSlot = selected;
