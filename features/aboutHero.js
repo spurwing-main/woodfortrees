@@ -65,6 +65,7 @@ export function init() {
     const loaded = [];
     let autoTimer = null;
     let initDone = false;
+    let lastAutoSlot = null;
 
     const rand = (arr) => arr[(Math.random() * arr.length) | 0];
     const delayRand = () => AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
@@ -73,31 +74,64 @@ export function init() {
     const recentIds = [];
     const RECENT_LIMIT = 6;
 
+    // Track IDs that are currently mid-swap so we don't reuse them in another swap at the same time
+    const swappingIds = new Set();
+
     const markUsed = (id) => {
         if (id == null) return;
         recentIds.push(id);
         const maxLen = Math.min(RECENT_LIMIT, loaded.length || RECENT_LIMIT);
-        if (recentIds.length > maxLen) {
+        while (recentIds.length > maxLen) {
             recentIds.shift();
         }
     };
 
+    const getVisibleIds = () => {
+        const set = new Set();
+        for (const s of slots) {
+            if (s.id != null) set.add(s.id);
+        }
+        return set;
+    };
+
     /* ---------------------------------------------------------
-       IMAGE SELECTION — FIXED LOGIC
+       IMAGE SELECTION — GLOBAL AWARENESS
        - Never return current image (avoidId)
        - Prefer images not in recentIds
+       - Avoid images currently visible in any slot
+       - Avoid images currently mid-swap (swappingIds)
     --------------------------------------------------------- */
 
     const pickNewImage = (avoidId) => {
         if (!loaded.length) return null;
 
-        // Never pick the same image as currently in this slot
-        let candidates = loaded.filter((e) => e.id !== avoidId);
-        if (!candidates.length) return null;
+        const visibleIds = getVisibleIds();
+        const hardAvoid = new Set();
 
-        // Prefer images that haven't been used recently
-        const fresh = candidates.filter((e) => !recentIds.includes(e.id));
-        const pool = fresh.length ? fresh : candidates;
+        // avoid current image for this slot
+        if (avoidId != null) hardAvoid.add(avoidId);
+
+        // avoid all visible images (so we don't stamp the same image twice at once)
+        for (const id of visibleIds) hardAvoid.add(id);
+
+        // avoid anything mid-swap
+        for (const id of swappingIds) hardAvoid.add(id);
+
+        // strict candidates: not in hardAvoid
+        let strictCandidates = loaded.filter((e) => !hardAvoid.has(e.id));
+
+        // prefer those not in recentIds
+        const recentSet = new Set(recentIds);
+        const fresh = strictCandidates.filter((e) => !recentSet.has(e.id));
+
+        let pool = fresh.length ? fresh : strictCandidates;
+
+        // fallback: if somehow everything is in hardAvoid, relax to "anything except avoidId"
+        if (!pool.length) {
+            pool = loaded.filter((e) => e.id !== avoidId);
+        }
+
+        if (!pool.length) return null;
 
         return rand(pool);
     };
@@ -125,10 +159,14 @@ export function init() {
             return;
         }
 
+        // Reserve this ID while it's mid-swap so we don't pick it again in another slot simultaneously
+        swappingIds.add(next.id);
+
         const oldEl = slot.el;
         const parent = oldEl.parentNode;
         if (!parent) {
             slot.busy = false;
+            swappingIds.delete(next.id);
             return;
         }
 
@@ -173,6 +211,8 @@ export function init() {
             })
             .finally(() => {
                 slot.busy = false;
+                swappingIds.delete(next.id);
+
                 if (slot.pending) {
                     slot.pending = false;
                     swapSlot(slot, "manual");
@@ -218,8 +258,15 @@ export function init() {
         }
 
         const free = slots.filter((s) => !s.busy && s.id !== null);
-        if (free.length) {
-            swapSlot(rand(free), "auto");
+
+        // Exclude the last auto-swapped slot to prevent immediate repeats
+        const candidates = free.filter((s) => s !== lastAutoSlot);
+        const pool = candidates.length ? candidates : free;
+
+        if (pool.length) {
+            const selected = rand(pool);
+            lastAutoSlot = selected;
+            swapSlot(selected, "auto");
         }
 
         startAutoLoop();
@@ -239,6 +286,8 @@ export function init() {
             clearTimeout(autoTimer);
             autoTimer = null;
         }
+
+        lastAutoSlot = null; // Reset tracking on manual swap
 
         for (const s of slots) {
             if (s.busy) {
