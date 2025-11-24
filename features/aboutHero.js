@@ -67,8 +67,21 @@ export function init() {
     let initDone = false;
     let lastAutoSlot = null;
 
+    // Parallax state - shared globally
+    let parallaxCx = 0;
+    let parallaxCy = 0;
+
     const rand = (arr) => arr[(Math.random() * arr.length) | 0];
     const delayRand = () => AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
+
+    const shuffle = (arr) => {
+        const copy = arr.slice();
+        for (let i = copy.length - 1; i > 0; i--) {
+            const j = (Math.random() * (i + 1)) | 0;
+            [copy[i], copy[j]] = [copy[j], copy[i]];
+        }
+        return copy;
+    };
 
     // Recent-use buffer to avoid hammering the same images
     const recentIds = [];
@@ -80,7 +93,7 @@ export function init() {
     const markUsed = (id) => {
         if (id == null) return;
         recentIds.push(id);
-        const maxLen = Math.min(RECENT_LIMIT, loaded.length || RECENT_LIMIT);
+        const maxLen = Math.min(RECENT_LIMIT, Math.max(3, loaded.length - 2));
         while (recentIds.length > maxLen) {
             recentIds.shift();
         }
@@ -176,6 +189,11 @@ export function init() {
         newEl.dataset.heroId = next.id;
         newEl.dataset.heroUrl = next.blobUrl;
 
+        // Apply current parallax offset immediately to prevent glitch
+        const parallaxOffsetX = parallaxCx * slot.depth;
+        const parallaxOffsetY = parallaxCy * slot.depth;
+        newEl.style.translate = `${parallaxOffsetX}px ${parallaxOffsetY}px`;
+
         newEl.style.opacity = "0";
         newEl.style.transform = `translateY(${cfg.inY}px) scale(${cfg.inS})`;
 
@@ -228,8 +246,10 @@ export function init() {
         if (initDone) return;
         initDone = true;
 
+        const shuffledEls = shuffle(slots.map((s) => s.el));
+
         animate(
-            slots.map((s) => s.el),
+            shuffledEls,
             {
                 opacity: [0, 1],
                 y: [-28, 0],
@@ -287,7 +307,7 @@ export function init() {
             autoTimer = null;
         }
 
-        lastAutoSlot = null; // Reset tracking on manual swap
+        lastAutoSlot = null;
 
         for (const s of slots) {
             if (s.busy) {
@@ -369,22 +389,22 @@ export function init() {
 
         let tx = 0,
             ty = 0;
-        let cx = 0,
-            cy = 0;
         const lerp = 0.04;
         const maxShift = 8;
         let raf = null;
 
         const tick = () => {
             raf = null;
-            cx += (tx - cx) * lerp;
-            cy += (ty - cy) * lerp;
+            parallaxCx += (tx - parallaxCx) * lerp;
+            parallaxCy += (ty - parallaxCy) * lerp;
 
             for (const slot of slots) {
-                slot.el.style.translate = `${cx * slot.depth}px ${cy * slot.depth}px`;
+                if (slot.el && slot.el.style) {
+                    slot.el.style.translate = `${parallaxCx * slot.depth}px ${parallaxCy * slot.depth}px`;
+                }
             }
 
-            if (Math.abs(tx - cx) > 0.1 || Math.abs(ty - cy) > 0.1) {
+            if (Math.abs(tx - parallaxCx) > 0.1 || Math.abs(ty - parallaxCy) > 0.1) {
                 raf = requestAnimationFrame(tick);
             }
         };
