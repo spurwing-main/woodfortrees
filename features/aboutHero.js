@@ -47,8 +47,8 @@ export function init() {
         ease: "easeOut",
     };
 
-    const AUTO_MIN = 600;    // reduced from 2200 (faster swapping)
-    const AUTO_MAX = 1200;    // reduced from 3200 (faster swapping)
+    const AUTO_MIN = 1000; // 1s
+    const AUTO_MAX = 3000; // 3s
 
     /* ---------------------------------------------------------
        SLOT MODEL
@@ -59,20 +59,45 @@ export function init() {
         id: null,
         busy: false,
         pending: false,
-        depth: 0.4 + Math.random() * 0.8,
     }));
 
     const loaded = [];
     let autoTimer = null;
     let initDone = false;
-    let lastAutoSlot = null;
-
-    // Parallax state - shared globally
-    let parallaxCx = 0;
-    let parallaxCy = 0;
+    let lastAutoIndex = -1;
 
     const rand = (arr) => arr[(Math.random() * arr.length) | 0];
     const delayRand = () => AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
+
+    const jitterInsetValue = (value) => {
+        if (!value) return value;
+
+        const match = value.match(/^(-?\d+(?:\.\d+)?)(cqw|cqh)$/);
+        if (!match) return value;
+
+        const base = parseFloat(match[1]);
+        if (!Number.isFinite(base)) return value;
+
+        const deltaRange = base * 0.1;
+        const delta = (Math.random() * 2 - 1) * deltaRange;
+        const next = Math.min(100, Math.max(0, base + delta));
+
+        return `${next}${match[2]}`;
+    };
+
+    const applyPositionJitter = (fromEl, toEl) => {
+        const style = getComputedStyle(fromEl);
+
+        const left = jitterInsetValue(style.left);
+        const right = jitterInsetValue(style.right);
+        const top = jitterInsetValue(style.top);
+        const bottom = jitterInsetValue(style.bottom);
+
+        if (left !== style.left) toEl.style.left = left;
+        if (right !== style.right) toEl.style.right = right;
+        if (top !== style.top) toEl.style.top = top;
+        if (bottom !== style.bottom) toEl.style.bottom = bottom;
+    };
 
     const shuffle = (arr) => {
         const copy = arr.slice();
@@ -189,10 +214,7 @@ export function init() {
         newEl.dataset.heroId = next.id;
         newEl.dataset.heroUrl = next.blobUrl;
 
-        // Apply current parallax offset immediately to prevent glitch
-        const parallaxOffsetX = parallaxCx * slot.depth;
-        const parallaxOffsetY = parallaxCy * slot.depth;
-        newEl.style.translate = `${parallaxOffsetX}px ${parallaxOffsetY}px`;
+        applyPositionJitter(oldEl, newEl);
 
         newEl.style.opacity = "0";
         newEl.style.transform = `translateY(${cfg.inY}px) scale(${cfg.inS})`;
@@ -277,17 +299,24 @@ export function init() {
             return;
         }
 
-        const free = slots.filter((s) => !s.busy && s.id !== null);
-        
-        // Exclude the last auto-swapped slot to prevent immediate repeats
-        const candidates = free.filter((s) => s !== lastAutoSlot);
-        const pool = candidates.length ? candidates : free;
-        
-        if (pool.length) {
-            const selected = rand(pool);
-            lastAutoSlot = selected;
-            swapSlot(selected, "auto");
+        const freeIndexes = slots
+            .map((slot, index) => ({ slot, index }))
+            .filter((entry) => !entry.slot.busy && entry.slot.id !== null);
+
+        if (!freeIndexes.length) {
+            startAutoLoop();
+            return;
         }
+
+        const candidates = freeIndexes.filter(
+            (entry) => entry.index !== lastAutoIndex
+        );
+
+        const pool = candidates.length ? candidates : freeIndexes;
+        const selected = rand(pool);
+
+        lastAutoIndex = selected.index;
+        swapSlot(selected.slot, "auto");
 
         startAutoLoop();
     };
@@ -307,7 +336,7 @@ export function init() {
             autoTimer = null;
         }
 
-        lastAutoSlot = null;
+        lastAutoIndex = -1;
 
         for (const s of slots) {
             if (s.busy) {
@@ -380,57 +409,6 @@ export function init() {
     };
 
     /* ---------------------------------------------------------
-       PARALLAX
-    --------------------------------------------------------- */
-
-    const setupParallax = () => {
-        if (!window.matchMedia("(pointer:fine)").matches) return;
-        if (!section) return;
-
-        let tx = 0,
-            ty = 0;
-        const lerp = 0.04;
-        const maxShift = 8;
-        let raf = null;
-
-        const tick = () => {
-            raf = null;
-            parallaxCx += (tx - parallaxCx) * lerp;
-            parallaxCy += (ty - parallaxCy) * lerp;
-
-            for (const slot of slots) {
-                if (slot.el && slot.el.style) {
-                    slot.el.style.translate = `${parallaxCx * slot.depth}px ${parallaxCy * slot.depth}px`;
-                }
-            }
-
-            if (Math.abs(tx - parallaxCx) > 0.1 || Math.abs(ty - parallaxCy) > 0.1) {
-                raf = requestAnimationFrame(tick);
-            }
-        };
-
-        const queue = () => {
-            if (!raf) raf = requestAnimationFrame(tick);
-        };
-
-        section.addEventListener("mousemove", (e) => {
-            const r = section.getBoundingClientRect();
-            const nx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
-            const ny = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
-
-            tx = -Math.max(-1, Math.min(1, nx)) * maxShift;
-            ty = -Math.max(-1, Math.min(1, ny)) * maxShift;
-
-            queue();
-        });
-
-        section.addEventListener("mouseleave", () => {
-            tx = ty = 0;
-            queue();
-        });
-    };
-
-    /* ---------------------------------------------------------
        IMAGE LOADING → triggers cascade
     --------------------------------------------------------- */
 
@@ -470,5 +448,4 @@ export function init() {
     --------------------------------------------------------- */
 
     setupTitle();
-    setupParallax();
 }
