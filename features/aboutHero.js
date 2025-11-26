@@ -1,32 +1,32 @@
-// Motion-first hero engine — NO JIGGLE, improved image selection
-// Motion CDN required:
-// <script type="module" src="https://cdn.jsdelivr.net/npm/motion@latest/+esm"></script>
-
 import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
 export function init() {
     const root = document.querySelector(".about_layout");
-    if (!root) return;
-
     const section = document.querySelector(".section_about");
     const svg = document.querySelector(".about_svg");
     const title = document.querySelector(".about_title");
 
-    const els = Array.from(root.querySelectorAll(".about_item"));
-    if (!els.length) return;
+    if (!root) return;
 
-    const imageList = Array.isArray(window.aboutHeroImages)
+    const images = Array.isArray(window.aboutHeroImages)
         ? window.aboutHeroImages.slice()
         : [];
 
-    if (!imageList.length) {
+    if (!images.length) {
         console.warn("No aboutHeroImages found");
         return;
     }
 
-    /* ---------------------------------------------------------
-       MOTION FEEL
-    --------------------------------------------------------- */
+    // ⚠️ You really want this:
+    // .about_layout {
+    //   display: grid;
+    //   grid-template-columns: repeat(30, 1fr);
+    //   grid-template-rows: repeat(30, 1fr);
+    // }
+
+    /* ---------------------------------------------
+       MOTION FEEL (your springs + forced durations)
+    --------------------------------------------- */
 
     const T_MANUAL = {
         type: "spring",
@@ -47,140 +47,209 @@ export function init() {
         ease: "easeOut",
     };
 
-    const AUTO_MIN = 1000; // 1s
-    const AUTO_MAX = 3000; // 3s
+    const AUTO_MIN = 1000;
+    const AUTO_MAX = 3000;
+    const delayRand = () =>
+        AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
+    const randInt = (min, max) =>
+        Math.floor(Math.random() * (max - min + 1)) + min;
+    const rand = (arr) => arr[(Math.random() * arr.length) | 0];
 
-    /* ---------------------------------------------------------
-       SLOT MODEL
-    --------------------------------------------------------- */
+    /* ---------------------------------------------
+       GRID MODEL (cells, 0-based)
+    --------------------------------------------- */
 
-    const slots = els.map((el) => ({
-        el,
-        id: null,
+    const GRID_ROWS = 30;
+    const GRID_COLS = 30;
+
+    const BLOCK_W = 10; // cells
+    const BLOCK_H = 15; // cells
+
+    // r0, c0 are 0-based cell indices
+    const BLOCKS = [
+        { r0: 0, c0: 0 },  // top-left
+        { r0: 0, c0: 10 },  // top-middle
+        { r0: 0, c0: 20 },  // top-right
+        { r0: 15, c0: 0 },  // bottom-left
+        { r0: 15, c0: 10 },  // bottom-middle
+        { r0: 15, c0: 20 },  // bottom-right
+    ];
+
+    const SLOT_COUNT = BLOCKS.length;
+
+    // Size breathing band
+    const BASE_W = 6;
+    const BASE_H = 10;
+    const MIN_W = 4;
+    const MAX_W = Math.min(8, BLOCK_W);  // <=10
+    const MIN_H = 8;
+    const MAX_H = Math.min(12, BLOCK_H); // <=15
+
+    const slots = Array.from({ length: SLOT_COUNT }, (_, i) => ({
+        index: i,
+        blockIndex: i,
+        el: null,
+        imgIndex: i % images.length,
         busy: false,
-        pending: false,
+        geom: null, // { rowCell, colCell, w, h, area }
     }));
 
-    const loaded = [];
-    let autoTimer = null;
-    let initDone = false;
-    let lastAutoIndex = -1;
+    /* ---------------------------------------------
+       SIZE + POSITION HELPERS (safe, 0-based)
+    --------------------------------------------- */
 
-    const rand = (arr) => arr[(Math.random() * arr.length) | 0];
-    const delayRand = () => AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
+    // Only change COL span (w), keep ROW span (h) fixed
+    function pickSize(lastGeom) {
+        // Fixed row span: never changes once chosen
+        const h = Math.min(Math.max(BASE_H, MIN_H), MAX_H);
 
-    const jitterInsetValue = (value) => {
-        if (!value) return value;
+        // Start from previous width if present, otherwise base
+        let wBase = lastGeom ? lastGeom.w : BASE_W;
+        wBase = Math.min(Math.max(wBase, MIN_W), MAX_W);
 
-        const match = value.match(/^(-?\d+(?:\.\d+)?)(cqw|cqh)$/);
-        if (!match) return value;
+        // Wiggle width by ±1 within bounds
+        const wCandidates = [];
+        for (const dw of [-1, 1]) {
+            const w = wBase + dw;
+            if (w >= MIN_W && w <= MAX_W) wCandidates.push(w);
+        }
 
-        const base = parseFloat(match[1]);
-        if (!Number.isFinite(base)) return value;
+        // If we somehow can't move (at extreme), stay at current width
+        if (!wCandidates.length) {
+            wCandidates.push(wBase);
+        }
 
-        const deltaRange = base * 0.1;
-        const delta = (Math.random() * 2 - 1) * deltaRange;
-        const next = Math.min(100, Math.max(0, base + delta));
+        const w = rand(wCandidates);
+        return { w, h };
+    }
 
-        return `${next}${match[2]}`;
-    };
+    function pickGeom(blockIndex, lastGeom) {
+        const block = BLOCKS[blockIndex];
+        const { w, h } = pickSize(lastGeom);
 
-    const applyPositionJitter = (fromEl, toEl) => {
-        const style = getComputedStyle(fromEl);
+        // block in cells: [r0 .. r0+BLOCK_H-1], [c0 .. c0+BLOCK_W-1]
+        let rowMin = block.r0;
+        let rowMax = block.r0 + BLOCK_H - h; // inclusive
+        let colMin = block.c0;
+        let colMax = block.c0 + BLOCK_W - w; // inclusive
 
-        const left = jitterInsetValue(style.left);
-        const right = jitterInsetValue(style.right);
-        const top = jitterInsetValue(style.top);
-        const bottom = jitterInsetValue(style.bottom);
+        // clamp to grid bounds (defensive)
+        rowMin = Math.max(0, rowMin);
+        colMin = Math.max(0, colMin);
+        rowMax = Math.min(GRID_ROWS - h, rowMax);
+        colMax = Math.min(GRID_COLS - w, colMax);
 
-        if (left !== style.left) toEl.style.left = left;
-        if (right !== style.right) toEl.style.right = right;
-        if (top !== style.top) toEl.style.top = top;
-        if (bottom !== style.bottom) toEl.style.bottom = bottom;
-    };
+        if (rowMax < rowMin) rowMax = rowMin;
+        if (colMax < colMin) colMax = colMin;
 
-    const shuffle = (arr) => {
+        const opts = [];
+        for (let r = rowMin; r <= rowMax; r++) {
+            for (let c = colMin; c <= colMax; c++) {
+                opts.push({ rowCell: r, colCell: c, w, h });
+            }
+        }
+
+        let candidates = opts;
+
+        if (lastGeom) {
+            // ❗️Avoid same anchor position, regardless of size
+            candidates = opts.filter(
+                (g) =>
+                    !(
+                        g.rowCell === lastGeom.rowCell &&
+                        g.colCell === lastGeom.colCell
+                    )
+            );
+
+            // If the block is tiny and we *must* reuse the same anchor, fall back
+            if (!candidates.length) {
+                candidates = opts;
+            }
+        }
+
+        const g = rand(candidates);
+
+        const rowStart = g.rowCell + 1;
+        const rowEnd = g.rowCell + g.h + 1;
+        const colStart = g.colCell + 1;
+        const colEnd = g.colCell + g.w + 1;
+
+        return {
+            ...g,
+            area: `${rowStart} / ${colStart} / ${rowEnd} / ${colEnd}`,
+        };
+    }
+
+    function applyGeom(el, geom) {
+        el.style.gridArea = geom.area;
+    }
+
+    /* ---------------------------------------------
+       IMAGE PICKING
+    --------------------------------------------- */
+
+    function pickNewImageIndex(current) {
+        if (images.length <= 1) return current || 0;
+        let next = current;
+        while (next === current) {
+            next = randInt(0, images.length - 1);
+        }
+        return next;
+    }
+
+    /* ---------------------------------------------
+       PER-CYCLE SEQUENCE OVER BLOCKS
+    --------------------------------------------- */
+
+    function shuffle(arr) {
         const copy = arr.slice();
         for (let i = copy.length - 1; i > 0; i--) {
             const j = (Math.random() * (i + 1)) | 0;
             [copy[i], copy[j]] = [copy[j], copy[i]];
         }
         return copy;
-    };
+    }
 
-    // Recent-use buffer to avoid hammering the same images
-    const recentIds = [];
-    const RECENT_LIMIT = 6;
+    let sequence = [];
+    let seqPos = 0;
+    let lastSeqLastBlock = null;
+    let autoTimer = null;
+    let initDone = false;
 
-    // Track IDs that are currently mid-swap so we don't reuse them in another swap at the same time
-    const swappingIds = new Set();
-
-    const markUsed = (id) => {
-        if (id == null) return;
-        recentIds.push(id);
-        const maxLen = Math.min(RECENT_LIMIT, Math.max(3, loaded.length - 2));
-        while (recentIds.length > maxLen) {
-            recentIds.shift();
+    function makeSequence(disallowFirst) {
+        const base = shuffle([...Array(SLOT_COUNT).keys()]);
+        if (
+            disallowFirst != null &&
+            base[0] === disallowFirst &&
+            base.length > 1
+        ) {
+            const swapIndex = randInt(1, base.length - 1);
+            [base[0], base[swapIndex]] = [base[swapIndex], base[0]];
         }
-    };
+        return base;
+    }
 
-    const getVisibleIds = () => {
-        const set = new Set();
-        for (const s of slots) {
-            if (s.id != null) set.add(s.id);
+    function startNewSequence() {
+        sequence = makeSequence(lastSeqLastBlock);
+        seqPos = 0;
+    }
+
+    function nextBlockIndex() {
+        if (seqPos >= sequence.length) {
+            lastSeqLastBlock = sequence[sequence.length - 1];
+            startNewSequence();
         }
-        return set;
-    };
+        const idx = sequence[seqPos++];
+        lastSeqLastBlock = idx;
+        return idx;
+    }
 
-    /* ---------------------------------------------------------
-       IMAGE SELECTION — GLOBAL AWARENESS
-       - Never return current image (avoidId)
-       - Prefer images not in recentIds
-       - Avoid images currently visible in any slot
-       - Avoid images currently mid-swap (swappingIds)
-    --------------------------------------------------------- */
+    /* ---------------------------------------------
+       SWAP LOGIC — springy with clear motion
+    --------------------------------------------- */
 
-    const pickNewImage = (avoidId) => {
-        if (!loaded.length) return null;
-
-        const visibleIds = getVisibleIds();
-        const hardAvoid = new Set();
-
-        // avoid current image for this slot
-        if (avoidId != null) hardAvoid.add(avoidId);
-
-        // avoid all visible images (so we don't stamp the same image twice at once)
-        for (const id of visibleIds) hardAvoid.add(id);
-
-        // avoid anything mid-swap
-        for (const id of swappingIds) hardAvoid.add(id);
-
-        // strict candidates: not in hardAvoid
-        let strictCandidates = loaded.filter((e) => !hardAvoid.has(e.id));
-
-        // prefer those not in recentIds
-        const recentSet = new Set(recentIds);
-        const fresh = strictCandidates.filter((e) => !recentSet.has(e.id));
-
-        let pool = fresh.length ? fresh : strictCandidates;
-
-        // fallback: if somehow everything is in hardAvoid, relax to "anything except avoidId"
-        if (!pool.length) {
-            pool = loaded.filter((e) => e.id !== avoidId);
-        }
-
-        if (!pool.length) return null;
-
-        return rand(pool);
-    };
-
-    /* ---------------------------------------------------------
-       SWAP SLOT
-    --------------------------------------------------------- */
-
-    const swapSlot = (slot, mode) => {
-        if (slot.busy) return;
-        if (!loaded.length) return;
+    function swapSlot(slot, mode) {
+        if (!slot || slot.busy) return Promise.resolve();
 
         slot.busy = true;
 
@@ -189,203 +258,188 @@ export function init() {
                 ? { outY: 26, outS: 0.88, inY: -32, inS: 1.09 }
                 : { outY: 12, outS: 0.95, inY: -18, inS: 1.03 };
 
-        const transition = mode === "manual" ? T_MANUAL : T_AUTO;
+        const spring = mode === "manual" ? T_MANUAL : T_AUTO;
+        const OUT_DUR = mode === "manual" ? 0.45 : 0.4;
+        const IN_DUR = mode === "manual" ? 0.65 : 0.55;
 
-        const next = pickNewImage(slot.id);
-        if (!next) {
-            slot.busy = false;
-            return;
-        }
-
-        // Reserve this ID while it's mid-swap so we don't pick it again in another slot simultaneously
-        swappingIds.add(next.id);
+        const newImgIndex = pickNewImageIndex(slot.imgIndex);
+        const geom = pickGeom(slot.blockIndex, slot.geom);
 
         const oldEl = slot.el;
-        const parent = oldEl.parentNode;
-        if (!parent) {
-            slot.busy = false;
-            swappingIds.delete(next.id);
-            return;
-        }
+        const newEl = document.createElement("img");
 
-        const newEl = oldEl.cloneNode(true);
-
-        newEl.src = next.blobUrl;
-        newEl.dataset.heroId = next.id;
-        newEl.dataset.heroUrl = next.blobUrl;
-
-        applyPositionJitter(oldEl, newEl);
-
+        newEl.className = "about_item";
+        newEl.src = images[newImgIndex];
         newEl.style.opacity = "0";
         newEl.style.transform = `translateY(${cfg.inY}px) scale(${cfg.inS})`;
+        applyGeom(newEl, geom);
 
-        parent.insertBefore(newEl, oldEl.nextSibling);
+        if (oldEl) oldEl.after(newEl);
+        else root.appendChild(newEl);
 
-        const pOut = animate(
-            oldEl,
-            {
-                opacity: 0,
-                y: cfg.outY,
-                scale: cfg.outS,
-            },
-            transition
-        ).finished.then(() => oldEl.remove());
+        const outP = oldEl
+            ? animate(
+                oldEl,
+                {
+                    opacity: [1, 0],
+                    y: [0, cfg.outY],
+                    scale: [1, cfg.outS],
+                    rotate: [0, 2],
+                },
+                { ...spring, duration: OUT_DUR }
+            ).finished.then(() => oldEl.remove())
+            : Promise.resolve();
 
-        const pIn = animate(
-            newEl,
-            {
-                opacity: 1,
-                y: [cfg.inY, 0],
-                scale: [cfg.inS, 1],
-            },
-            transition
-        ).finished.then(() => {
-            slot.el = newEl;
-            slot.id = next.id;
-            markUsed(next.id);
-        });
-
-        Promise.all([pOut, pIn])
-            .catch(() => {
-                // swallow, just unlock
-            })
-            .finally(() => {
+        return outP
+            .then(() =>
+                animate(
+                    newEl,
+                    {
+                        opacity: [0, 1],
+                        y: [cfg.inY, 4, 0],
+                        scale: [cfg.inS, 0.97, 1],
+                        rotate: [-2, 0],
+                    },
+                    { ...spring, duration: IN_DUR }
+                ).finished
+            )
+            .catch(() => { })
+            .then(() => {
+                slot.el = newEl;
+                slot.imgIndex = newImgIndex;
+                slot.geom = geom;
                 slot.busy = false;
-                swappingIds.delete(next.id);
-
-                if (slot.pending) {
-                    slot.pending = false;
-                    swapSlot(slot, "manual");
-                }
             });
-    };
+    }
 
-    /* ---------------------------------------------------------
-       INITIAL DROP
-    --------------------------------------------------------- */
+    function swapBlockAuto(blockIndex) {
+        const slot = slots[blockIndex];
+        return swapSlot(slot, "auto");
+    }
 
-    const startInitial = () => {
-        if (initDone) return;
-        initDone = true;
+    /* ---------------------------------------------
+       GLOBAL SWAP — nukes auto, then restarts
+    --------------------------------------------- */
 
-        const shuffledEls = shuffle(slots.map((s) => s.el));
-
-        animate(
-            shuffledEls,
-            {
-                opacity: [0, 1],
-                y: [-28, 0],
-                scale: [1.08, 1],
-                rotate: [2, 0],
-            },
-            {
-                ...T_AUTO,
-                delay: stagger(0.12),
-            }
-        ).finished.then(() => {
-            startAutoLoop();
-        });
-    };
-
-    /* ---------------------------------------------------------
-       AUTO LOOP
-    --------------------------------------------------------- */
-
-    const autoTick = () => {
-        autoTimer = null;
-
-        if (!initDone || !loaded.length) {
-            startAutoLoop();
-            return;
-        }
-
-        const freeIndexes = slots
-            .map((slot, index) => ({ slot, index }))
-            .filter((entry) => !entry.slot.busy && entry.slot.id !== null);
-
-        if (!freeIndexes.length) {
-            startAutoLoop();
-            return;
-        }
-
-        const candidates = freeIndexes.filter(
-            (entry) => entry.index !== lastAutoIndex
-        );
-
-        const pool = candidates.length ? candidates : freeIndexes;
-        const selected = rand(pool);
-
-        lastAutoIndex = selected.index;
-        swapSlot(selected.slot, "auto");
-
-        startAutoLoop();
-    };
-
-    const startAutoLoop = () => {
-        if (autoTimer) return;
-        autoTimer = setTimeout(autoTick, delayRand());
-    };
-
-    /* ---------------------------------------------------------
-       GLOBAL MANUAL SWAP
-    --------------------------------------------------------- */
-
-    const globalSwap = () => {
+    async function globalSwapManual() {
+        // stop future ticks
         if (autoTimer) {
             clearTimeout(autoTimer);
             autoTimer = null;
         }
 
-        lastAutoIndex = -1;
-
-        for (const s of slots) {
-            if (s.busy) {
-                s.pending = true;
-            } else if (s.id != null) {
-                swapSlot(s, "manual");
-            }
+        // wait for any current swaps to finish
+        while (slots.some((s) => s.busy)) {
+            await new Promise((r) => setTimeout(r, 16));
         }
 
-        startAutoLoop();
-    };
+        // run manual swap on all slots
+        await Promise.all(slots.map((s) => swapSlot(s, "manual")));
 
-    /* ---------------------------------------------------------
-       THEME
-    --------------------------------------------------------- */
+        // restart auto
+        startNewSequence();
+        startAutoLoop();
+    }
+
+    /* ---------------------------------------------
+       AUTO LOOP
+    --------------------------------------------- */
+
+    async function autoTick() {
+        autoTimer = null;
+        if (!initDone) return;
+
+        const blockIndex = nextBlockIndex();
+        await swapBlockAuto(blockIndex);
+
+        autoTimer = setTimeout(autoTick, delayRand());
+    }
+
+    function startAutoLoop() {
+        if (autoTimer) return;
+        autoTimer = setTimeout(autoTick, delayRand());
+    }
+
+    /* ---------------------------------------------
+       INITIAL BUILD + DROP-IN
+    --------------------------------------------- */
+
+    root.innerHTML = "";
+    const initialEls = [];
+
+    slots.forEach((slot) => {
+        const geom = pickGeom(slot.blockIndex, null);
+        const el = document.createElement("img");
+
+        el.className = "about_item";
+        el.src = images[slot.imgIndex];
+        el.style.opacity = "0";
+        el.style.transform = "translateY(-28px) scale(1.08)";
+        applyGeom(el, geom);
+
+        slot.el = el;
+        slot.geom = geom;
+
+        root.appendChild(el);
+        initialEls.push(el);
+    });
+
+    animate(
+        initialEls,
+        {
+            opacity: [0, 1],
+            y: [-28, 0],
+            scale: [1.08, 1],
+            rotate: [2, 0],
+        },
+        {
+            ...T_AUTO,
+            delay: stagger(0.12),
+        }
+    ).finished.then(() => {
+        initDone = true;
+        startNewSequence();
+        startAutoLoop();
+    });
+
+    /* ---------------------------------------------
+       THEME + TITLE CLICKS
+    --------------------------------------------- */
 
     const baseBg = section ? getComputedStyle(section).backgroundColor : "#fff";
     const pink =
         getComputedStyle(document.documentElement)
             .getPropertyValue("--_color---pink")
             .trim() || baseBg;
-
     const svgBase = svg ? getComputedStyle(svg).color : null;
 
-    const applyTheme = () => {
+    function applyTheme() {
         const active = title?.querySelector(".about_title-active");
         if (!active) return;
 
-        const wrappers = title.querySelectorAll(".title-l");
+        const wrappers = title?.querySelectorAll(".title-l") || [];
         if (wrappers.length < 2) return;
 
         const isPeople = active.closest(".title-l") === wrappers[0];
 
-        animate(
-            section,
-            { backgroundColor: isPeople ? pink : baseBg },
-            THEME_T
-        );
+        if (section) {
+            animate(
+                section,
+                { backgroundColor: isPeople ? pink : baseBg },
+                THEME_T
+            );
+        }
 
-        if (svg) {
+        if (svg && svgBase) {
             animate(
                 svg,
                 { color: isPeople ? baseBg : svgBase },
                 THEME_T
             );
         }
-    };
+    }
 
-    const setupTitle = () => {
+    function setupTitle() {
         if (!title) return;
 
         const wrappers = title.querySelectorAll(".title-l");
@@ -400,52 +454,13 @@ export function init() {
                 active.classList.remove("about_title-active");
                 (w.firstElementChild || w).classList.add("about_title-active");
 
-                globalSwap();
+                globalSwapManual();
                 applyTheme();
             });
         });
 
         applyTheme();
-    };
-
-    /* ---------------------------------------------------------
-       IMAGE LOADING → triggers cascade
-    --------------------------------------------------------- */
-
-    const tryStartInit = () => {
-        if (initDone) return;
-        const allFilled = slots.every((s) => s.id !== null);
-        if (allFilled || loaded.length) {
-            startInitial();
-        }
-    };
-
-    imageList.forEach((src, id) => {
-        fetch(src)
-            .then((r) => r.blob())
-            .then((blob) => {
-                const url = URL.createObjectURL(blob);
-                loaded.push({ id, blobUrl: url });
-
-                const slot = slots.find((s) => s.id === null);
-                if (slot) {
-                    slot.id = id;
-                    slot.el.src = url;
-                    slot.el.dataset.heroId = id;
-                    slot.el.dataset.heroUrl = url;
-                    markUsed(id);
-                }
-
-                tryStartInit();
-            })
-            .catch(() => {
-                tryStartInit();
-            });
-    });
-
-    /* ---------------------------------------------------------
-       START
-    --------------------------------------------------------- */
+    }
 
     setupTitle();
 }

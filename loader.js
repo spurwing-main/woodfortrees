@@ -35,6 +35,7 @@ function waitForDomReady() {
 const featureList = [
     { name: 'tooltip', load: () => import('./features/footerTooltip.js') },
     { name: 'aboutHero', load: () => import('./features/aboutHero.js') },
+    { name: 'aboutTeam', load: () => import('./features/aboutTeam.js') },
 ]
 
 let bootStarted = false
