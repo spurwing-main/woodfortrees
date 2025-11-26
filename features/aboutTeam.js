@@ -1,15 +1,16 @@
-import { animate } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
+// Use visualDuration for easier coordination with other animations
 const SPRING_IN = {
     type: "spring",
-    duration: 0.55,
-    bounce: 0.25,
+    visualDuration: 0.4,
+    bounce: 0.3,
 };
 
 const SPRING_OUT = {
     type: "spring",
-    duration: 0.45,
-    bounce: 0.2,
+    visualDuration: 0.3,
+    bounce: 0.15,
 };
 
 export function init() {
@@ -95,6 +96,7 @@ function setupStack(media, img1, img2, img3) {
 
 function wireInteractions(media, img1, img2, img3) {
     let state = 0;
+    let moveHandler = null;
 
     function goTo(nextState, { fromEnter = false } = {}) {
         if (nextState === state) return;
@@ -105,8 +107,6 @@ function wireInteractions(media, img1, img2, img3) {
             hideImage(img2, 0.05);
         } else if (nextState === 1) {
             // Top half: ensure second is in, hide third
-            // If coming from base (0 → 1), animate img2 in.
-            // If coming from bottom (2 → 1), img2 is already in, so only hide img3.
             if (state === 0) {
                 showImage(img2, 0);
             }
@@ -114,7 +114,7 @@ function wireInteractions(media, img1, img2, img3) {
         } else if (nextState === 2) {
             // Bottom half: show second and third
             if (state === 0 && fromEnter) {
-                // Started directly in bottom half → drop both together (tiny stagger)
+                // Started directly in bottom half → drop both together
                 showImage(img2, 0);
                 showImage(img3, 0.06);
             } else {
@@ -126,29 +126,36 @@ function wireInteractions(media, img1, img2, img3) {
         state = nextState;
     }
 
-    function pointerStateForEvent(e) {
+    function pointerStateForY(clientY) {
         const rect = media.getBoundingClientRect();
-        const y = e.clientY - rect.top;
+        const y = clientY - rect.top;
         if (y < 0 || y > rect.height) return null;
-
-        const halfway = rect.height / 2;
-        return y < halfway ? 1 : 2;
+        return y < rect.height / 2 ? 1 : 2;
     }
 
-    media.addEventListener("pointerenter", (e) => {
-        const s = pointerStateForEvent(e);
-        if (s == null) return;
-        goTo(s, { fromEnter: true });
-    });
+    // Use Motion's hover() for cleaner gesture handling
+    // It filters out fake touch-emulated hover events automatically
+    hover(media, (element, startEvent) => {
+        const initialState = pointerStateForY(startEvent.clientY);
+        if (initialState != null) {
+            goTo(initialState, { fromEnter: true });
+        }
 
-    media.addEventListener("pointermove", (e) => {
-        const s = pointerStateForEvent(e);
-        if (s == null) return;
-        goTo(s);
-    });
+        // Track pointer movement while hovering
+        moveHandler = (e) => {
+            const s = pointerStateForY(e.clientY);
+            if (s != null) goTo(s);
+        };
+        media.addEventListener("pointermove", moveHandler);
 
-    media.addEventListener("pointerleave", () => {
-        goTo(0);
+        // Return cleanup function called on hover end
+        return () => {
+            if (moveHandler) {
+                media.removeEventListener("pointermove", moveHandler);
+                moveHandler = null;
+            }
+            goTo(0);
+        };
     });
 }
 
@@ -160,7 +167,7 @@ function wireInteractions(media, img1, img2, img3) {
 function showImage(img, delay = 0) {
     img.style.visibility = "visible";
 
-    animate(
+    const controls = animate(
         img,
         {
             opacity: [0, 1],
@@ -174,10 +181,17 @@ function showImage(img, delay = 0) {
             delay,
         }
     );
+
+    // Clean up willChange after animation completes
+    controls.finished.then(() => {
+        img.style.willChange = "auto";
+    });
 }
 
 function hideImage(img, delay = 0) {
     if (img.style.visibility === "hidden") return;
+
+    img.style.willChange = "transform, opacity";
 
     const controls = animate(
         img,
@@ -196,6 +210,7 @@ function hideImage(img, delay = 0) {
 
     controls.finished.then(() => {
         img.style.visibility = "hidden";
+        img.style.willChange = "auto";
         // Reset back up ready for the next "drop"
         img.style.transform = composeTransform(img, -24, 0.96);
     });

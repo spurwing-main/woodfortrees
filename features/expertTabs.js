@@ -1,4 +1,4 @@
-import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+import { animate, stagger, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
 let mounted = false;
 let cleanupFns = [];
@@ -135,15 +135,17 @@ export function init() {
                 activate(i, { focusTab: true, reason: "click" });
             };
 
+            // Use Motion's hover() for cleaner hover detection
+            // Filters out fake touch-emulated hover events automatically
             let hoverTimer = null;
-            const onEnter = () => {
-                clearTimeout(hoverTimer);
+            const cancelHover = hover(tab, () => {
                 hoverTimer = setTimeout(
                     () => activate(i, { reason: "hover" }),
                     HOVER_DELAY
                 );
-            };
-            const onLeave = () => clearTimeout(hoverTimer);
+                // Return cleanup called on hover end
+                return () => clearTimeout(hoverTimer);
+            });
 
             const onKeyDown = (e) => {
                 switch (e.key) {
@@ -183,19 +185,16 @@ export function init() {
             const onBlur = () => clearFocusRing(tab);
 
             tab.addEventListener("click", onClick);
-            tab.addEventListener("pointerenter", onEnter);
-            tab.addEventListener("pointerleave", onLeave);
             tab.addEventListener("keydown", onKeyDown);
             tab.addEventListener("focus", onFocus);
             tab.addEventListener("blur", onBlur);
 
             addCleanup(() => {
                 tab.removeEventListener("click", onClick);
-                tab.removeEventListener("pointerenter", onEnter);
-                tab.removeEventListener("pointerleave", onLeave);
                 tab.removeEventListener("keydown", onKeyDown);
                 tab.removeEventListener("focus", onFocus);
                 tab.removeEventListener("blur", onBlur);
+                cancelHover(); // Clean up hover gesture
                 clearTimeout(hoverTimer);
             });
         });
@@ -302,9 +301,10 @@ function showPanel({
                 transform: ["translateY(10px)", "translateY(0px)"],
             },
             {
-                duration: initial ? 0.5 : 0.42,
+                type: "spring",
+                visualDuration: initial ? 0.4 : 0.35,
+                bounce: 0.15,
                 delay: stagger(0.06),
-                easing: "ease-out",
             }
         );
 
@@ -335,7 +335,12 @@ function showPanel({
                 filter: ["blur(0px)", "blur(12px)"],
                 transform: ["translateY(0px)", "translateY(-6px)"],
             },
-            { duration: 0.25, delay: stagger(0.04), easing: "ease-out" }
+            {
+                type: "spring",
+                visualDuration: 0.2,
+                bounce: 0,
+                delay: stagger(0.04),
+            }
         );
         activeAnimations.set(prevPanel, outCtrl);
         outCtrl.finished.finally(() => {
