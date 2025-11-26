@@ -1,5 +1,23 @@
 import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
+let mounted = false;
+let cleanupFns = [];
+
+function addCleanup(fn) {
+    cleanupFns.push(fn);
+}
+
+function cleanupAll() {
+    cleanupFns.splice(0).forEach((fn) => {
+        try {
+            fn();
+        } catch (err) {
+            console.warn("aboutHero cleanup", err);
+        }
+    });
+    mounted = false;
+}
+
 export function init() {
     const root = document.querySelector(".about_layout");
     const section = document.querySelector(".section_about");
@@ -7,6 +25,10 @@ export function init() {
     const title = document.querySelector(".about_title");
 
     if (!root) return;
+
+    if (mounted) {
+        cleanupAll();
+    }
 
     const rawImages = Array.isArray(window.aboutHeroImages)
         ? window.aboutHeroImages.slice()
@@ -48,6 +70,14 @@ export function init() {
         };
     });
 
+    const hasAnyPool = Object.keys(stateStore).length > 0;
+    if (!hasAnyPool) {
+        console.warn("No pools after filtering");
+        return;
+    }
+
+    mounted = true;
+
     const titleButtons = Array.from(
         title?.querySelectorAll("[data-about-hero]") || []
     );
@@ -80,6 +110,14 @@ export function init() {
        MOTION FEEL (your springs + forced durations)
     --------------------------------------------- */
 
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let REDUCE_MOTION = prefersReduced.matches;
+    const onReduceChange = (e) => {
+        REDUCE_MOTION = e.matches;
+    };
+    prefersReduced.addEventListener("change", onReduceChange);
+    addCleanup(() => prefersReduced.removeEventListener("change", onReduceChange));
+
     const T_MANUAL = {
         type: "spring",
         stiffness: 900,
@@ -106,6 +144,42 @@ export function init() {
     const randInt = (min, max) =>
         Math.floor(Math.random() * (max - min + 1)) + min;
     const rand = (arr) => arr[(Math.random() * arr.length) | 0];
+
+    function applyFinalState(target, keyframes) {
+        const apply = (el) => {
+            const tParts = [];
+            Object.entries(keyframes).forEach(([prop, value]) => {
+                const finalVal = Array.isArray(value)
+                    ? value[value.length - 1]
+                    : value;
+
+                if (prop === "y") {
+                    tParts.push(`translateY(${finalVal}px)`);
+                } else if (prop === "scale") {
+                    tParts.push(`scale(${finalVal})`);
+                } else if (prop === "rotate") {
+                    tParts.push(`rotate(${finalVal}deg)`);
+                } else {
+                    el.style[prop] = typeof finalVal === "number" ? String(finalVal) : finalVal;
+                }
+            });
+
+            if (tParts.length) {
+                el.style.transform = tParts.join(" ");
+            }
+        };
+
+        if (Array.isArray(target)) target.forEach(apply);
+        else apply(target);
+    }
+
+    function runAnimate(target, keyframes, options) {
+        if (REDUCE_MOTION) {
+            applyFinalState(target, keyframes);
+            return Promise.resolve();
+        }
+        return animate(target, keyframes, options).finished;
+    }
 
     /* ---------------------------------------------
        GRID MODEL (cells, 0-based)
@@ -146,12 +220,26 @@ export function init() {
         geom: null, // { rowCell, colCell, w, h, area }
     }));
 
+    addCleanup(() => {
+        root.innerHTML = "";
+        changeChain = Promise.resolve();
+        dropPromise = null;
+        initDone = false;
+    });
+
     /* ---------------------------------------------
        DATA + STATE HELPERS
     --------------------------------------------- */
 
     function dedupe(list) {
         return Array.from(new Set(list.filter(Boolean)));
+    }
+
+    function on(el, event, handler, options) {
+        el.addEventListener(event, handler, options);
+        addCleanup(() => {
+            el.removeEventListener(event, handler, options);
+        });
     }
 
     function normalizeKey(value) {
@@ -169,19 +257,20 @@ export function init() {
 
         const loadedList = Array.from(state.loaded);
         const pool = state.pool || [];
+        const okPool = pool.filter((src) => !state.failed.has(src));
 
         if (loadedList.length >= SLOT_COUNT) return loadedList.slice();
         if (loadedList.length) {
             const padded = loadedList.slice();
             let i = 0;
-            while (padded.length < SLOT_COUNT && pool.length) {
-                padded.push(pool[i % pool.length]);
+            while (padded.length < SLOT_COUNT && okPool.length) {
+                padded.push(okPool[i % okPool.length]);
                 i += 1;
             }
             return padded;
         }
 
-        return pool.slice(0, SLOT_COUNT);
+        return okPool.slice(0, SLOT_COUNT);
     }
 
     function updateImagesFromState(state) {
@@ -224,7 +313,6 @@ export function init() {
         record.promise = new Promise((resolve, reject) => {
             const img = new Image();
             img.decoding = "async";
-            img.loading = "eager";
 
             img.onload = () => {
                 record.status = "loaded";
@@ -315,7 +403,8 @@ export function init() {
         if (!state) return Promise.resolve([]);
         if (state.firstPromise) return state.firstPromise;
 
-        const target = Math.min(SLOT_COUNT, state.pool.length);
+        const okPool = state.pool.filter((src) => !state.failed.has(src));
+        const target = Math.min(SLOT_COUNT, okPool.length || state.pool.length);
         state.firstPromise = loadUpTo(state, target, 4).then((list) => {
             if (!list.length) return deriveDisplayList(state);
             return list;
@@ -328,8 +417,10 @@ export function init() {
         if (!state) return Promise.resolve([]);
         if (state.allPromise) return state.allPromise;
 
+        const desired = Math.max(0, state.pool.length - state.failed.size);
+
         state.allPromise = ensureFirstBatch(state)
-            .then(() => loadUpTo(state, state.pool.length, 3))
+            .then(() => loadUpTo(state, desired || state.pool.length, 3))
             .then(() => Array.from(state.loaded));
 
         return state.allPromise;
@@ -339,7 +430,7 @@ export function init() {
        SIZE + POSITION HELPERS (safe, 0-based)
     --------------------------------------------- */
 
-    // Only change COL span (w), keep ROW span (h) fixed
+    // Change both COL span (w) and ROW span (h) with small wiggle
     function pickSize(lastGeom) {
         let hBase = lastGeom ? lastGeom.h : BASE_H;
         hBase = Math.min(Math.max(hBase, MIN_H), MAX_H);
@@ -514,6 +605,13 @@ export function init() {
     let autoTimer = null;
     let initDone = false;
 
+    addCleanup(() => {
+        if (autoTimer) {
+            clearTimeout(autoTimer);
+            autoTimer = null;
+        }
+    });
+
     function makeSequence(disallowFirst) {
         const base = shuffle([...Array(SLOT_COUNT).keys()]);
         if (
@@ -584,7 +682,7 @@ export function init() {
         else root.appendChild(newEl);
 
         const outP = oldEl
-            ? animate(
+            ? runAnimate(
                 oldEl,
                 {
                     opacity: [1, 0],
@@ -593,12 +691,12 @@ export function init() {
                     rotate: [0, 2],
                 },
                 { ...spring, duration: OUT_DUR }
-            ).finished.then(() => oldEl.remove())
+            ).then(() => oldEl.remove())
             : Promise.resolve();
 
         return outP
             .then(() =>
-                animate(
+                runAnimate(
                     newEl,
                     {
                         opacity: [0, 1],
@@ -607,7 +705,7 @@ export function init() {
                         rotate: [-2, 0],
                     },
                     { ...spring, duration: IN_DUR }
-                ).finished
+                )
             )
             .catch(() => { })
             .then(() => {
@@ -618,9 +716,22 @@ export function init() {
             });
     }
 
+    function currentRows(excludeIndex) {
+        const rows = new Set();
+        slots.forEach((s, i) => {
+            if (i === excludeIndex) return;
+            if (s.geom) rows.add(s.geom.rowCell);
+        });
+        return rows;
+    }
+
     function swapBlockAuto(blockIndex) {
         const slot = slots[blockIndex];
-        return swapSlot(slot, "auto");
+        const reserved = {
+            images: new Set(),
+            rows: currentRows(blockIndex),
+        };
+        return swapSlot(slot, "auto", reserved);
     }
 
     /* ---------------------------------------------
@@ -639,9 +750,11 @@ export function init() {
             await new Promise((r) => setTimeout(r, 16));
         }
 
-        // run manual swap on all slots
+        // run manual swap on all slots (sequential to honor row/image uniqueness)
         const reserved = { images: new Set(), rows: new Set() };
-        await Promise.all(slots.map((s) => swapSlot(s, "manual", reserved)));
+        for (const s of slots) {
+            await swapSlot(s, "manual", reserved);
+        }
 
         // restart auto
         startNewSequence();
@@ -708,7 +821,7 @@ export function init() {
             initialEls.push(el);
         });
 
-        dropPromise = animate(
+        dropPromise = runAnimate(
             initialEls,
             {
                 opacity: [0, 1],
@@ -718,9 +831,9 @@ export function init() {
             },
             {
                 ...T_AUTO,
-                delay: stagger(0.12),
+                delay: REDUCE_MOTION ? 0 : stagger(0.12),
             }
-        ).finished.then(() => {
+        ).then(() => {
             initDone = true;
             startNewSequence();
             startAutoLoop();
@@ -744,7 +857,7 @@ export function init() {
         const isPeople = stateKey === "people";
 
         if (section) {
-            animate(
+            runAnimate(
                 section,
                 { backgroundColor: isPeople ? pink : baseBg },
                 THEME_T
@@ -752,7 +865,7 @@ export function init() {
         }
 
         if (svg && svgBase) {
-            animate(
+            runAnimate(
                 svg,
                 { color: isPeople ? baseBg : svgBase },
                 THEME_T
@@ -806,7 +919,7 @@ export function init() {
         if (!buttons.length) return;
 
         buttons.forEach((btn) => {
-            btn.addEventListener("click", () => {
+            on(btn, "click", () => {
                 handleStateChange(btn.dataset.aboutHero);
             });
         });
