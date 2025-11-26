@@ -8,14 +8,66 @@ export function init() {
 
     if (!root) return;
 
-    const images = Array.isArray(window.aboutHeroImages)
+    const rawImages = Array.isArray(window.aboutHeroImages)
         ? window.aboutHeroImages.slice()
         : [];
 
-    if (!images.length) {
+    if (!rawImages.length) {
         console.warn("No aboutHeroImages found");
         return;
     }
+
+    const pools = {
+        people: dedupe(
+            rawImages
+                .filter((item) => item?.people && item?.src)
+                .map((item) => item.src)
+        ),
+        places: dedupe(
+            rawImages
+                .filter((item) => item?.place && item?.src)
+                .map((item) => item.src)
+        ),
+    };
+
+    if (!pools.people.length && !pools.places.length) {
+        console.warn("No usable aboutHeroImages pools");
+        return;
+    }
+
+    const stateStore = {};
+    Object.entries(pools).forEach(([key, pool]) => {
+        if (!pool.length) return;
+        stateStore[key] = {
+            key,
+            pool: shuffle(pool),
+            loaded: new Set(),
+            failed: new Set(),
+            firstPromise: null,
+            allPromise: null,
+        };
+    });
+
+    const titleButtons = Array.from(
+        title?.querySelectorAll("[data-about-hero]") || []
+    );
+
+    const initialFromDom = titleButtons.find((btn) =>
+        btn.classList.contains("about_title-active")
+    );
+
+    let activeStateKey = normalizeKey(initialFromDom?.dataset.aboutHero);
+    if (!activeStateKey || !stateStore[activeStateKey]) {
+        activeStateKey = stateStore.people
+            ? "people"
+            : Object.keys(stateStore)[0];
+    }
+
+    syncTitleActive(activeStateKey);
+
+    let images = [];
+    let changeChain = Promise.resolve();
+    let dropPromise = null;
 
     // ⚠️ You really want this:
     // .about_layout {
@@ -89,10 +141,199 @@ export function init() {
         index: i,
         blockIndex: i,
         el: null,
-        imgIndex: i % images.length,
+        imgIndex: 0,
         busy: false,
         geom: null, // { rowCell, colCell, w, h, area }
     }));
+
+    /* ---------------------------------------------
+       DATA + STATE HELPERS
+    --------------------------------------------- */
+
+    function dedupe(list) {
+        return Array.from(new Set(list.filter(Boolean)));
+    }
+
+    function normalizeKey(value) {
+        return (value || "").toLowerCase();
+    }
+
+    function getOtherKey(key) {
+        if (key === "people" && stateStore.places) return "places";
+        if (key === "places" && stateStore.people) return "people";
+        return Object.keys(stateStore).find((k) => k !== key);
+    }
+
+    function deriveDisplayList(state) {
+        if (!state) return [];
+
+        const loadedList = Array.from(state.loaded);
+        const pool = state.pool || [];
+
+        if (loadedList.length >= SLOT_COUNT) return loadedList.slice();
+        if (loadedList.length) {
+            const padded = loadedList.slice();
+            let i = 0;
+            while (padded.length < SLOT_COUNT && pool.length) {
+                padded.push(pool[i % pool.length]);
+                i += 1;
+            }
+            return padded;
+        }
+
+        return pool.slice(0, SLOT_COUNT);
+    }
+
+    function updateImagesFromState(state) {
+        images = deriveDisplayList(state);
+        if (!images.length) return;
+
+        slots.forEach((slot) => {
+            slot.imgIndex = slot.imgIndex % images.length;
+        });
+    }
+
+    function syncTitleActive(key) {
+        if (!title) return;
+
+        const buttons = title.querySelectorAll("[data-about-hero]");
+        buttons.forEach((btn) => {
+            const isMatch = normalizeKey(btn.dataset.aboutHero) === key;
+            btn.classList.toggle("about_title-active", isMatch);
+        });
+    }
+
+    /* ---------------------------------------------
+       IMAGE LOADER + CACHE
+    --------------------------------------------- */
+
+    const imageCache = new Map();
+
+    function preloadImage(src) {
+        if (!src) return Promise.reject(new Error("empty src"));
+
+        const cached = imageCache.get(src);
+        if (cached) {
+            if (cached.status === "loaded") return cached.promise || Promise.resolve(src);
+            if (cached.status === "error") return cached.promise || Promise.reject(new Error("fail"));
+            return cached.promise;
+        }
+
+        const record = { status: "pending", promise: null };
+
+        record.promise = new Promise((resolve, reject) => {
+            const img = new Image();
+            img.decoding = "async";
+            img.loading = "eager";
+
+            img.onload = () => {
+                record.status = "loaded";
+                resolve(src);
+            };
+
+            img.onerror = () => {
+                record.status = "error";
+                reject(new Error(`Image failed: ${src}`));
+            };
+
+            img.src = src;
+        });
+
+        imageCache.set(src, record);
+        record.promise.catch(() => { });
+        return record.promise;
+    }
+
+    function loadUpTo(state, targetCount, limit = 4) {
+        if (!state || !state.pool.length) return Promise.resolve([]);
+
+        const desired = Math.min(targetCount, state.pool.length);
+        const results = Array.from(state.loaded);
+        if (results.length >= desired) return Promise.resolve(results.slice(0, desired));
+
+        const queue = state.pool.filter(
+            (src) => !state.loaded.has(src) && !state.failed.has(src)
+        );
+
+        let index = 0;
+        let inflight = 0;
+
+        return new Promise((resolve) => {
+            const maybeResolve = () => {
+                if (
+                    results.length >= desired ||
+                    (index >= queue.length && inflight === 0)
+                ) {
+                    resolve(results.slice(0, Math.min(desired, results.length)));
+                    return true;
+                }
+                return false;
+            };
+
+            const pump = () => {
+                if (maybeResolve()) return;
+
+                while (inflight < limit && index < queue.length) {
+                    const src = queue[index++];
+
+                    const cached = imageCache.get(src);
+                    if (cached?.status === "loaded") {
+                        state.loaded.add(src);
+                        results.push(src);
+                        continue;
+                    }
+                    if (cached?.status === "error") {
+                        state.failed.add(src);
+                        continue;
+                    }
+
+                    inflight += 1;
+                    preloadImage(src)
+                        .then(() => {
+                            state.loaded.add(src);
+                            results.push(src);
+                        })
+                        .catch(() => {
+                            state.failed.add(src);
+                        })
+                        .finally(() => {
+                            inflight -= 1;
+                            pump();
+                        });
+                }
+
+                if (index >= queue.length && inflight === 0) {
+                    maybeResolve();
+                }
+            };
+
+            pump();
+        });
+    }
+
+    function ensureFirstBatch(state) {
+        if (!state) return Promise.resolve([]);
+        if (state.firstPromise) return state.firstPromise;
+
+        const target = Math.min(SLOT_COUNT, state.pool.length);
+        state.firstPromise = loadUpTo(state, target, 4).then((list) => {
+            if (!list.length) return deriveDisplayList(state);
+            return list;
+        });
+
+        return state.firstPromise;
+    }
+
+    function ensureAll(state) {
+        if (!state) return Promise.resolve([]);
+        if (state.allPromise) return state.allPromise;
+
+        state.allPromise = ensureFirstBatch(state)
+            .then(() => loadUpTo(state, state.pool.length, 3))
+            .then(() => Array.from(state.loaded));
+
+        return state.allPromise;
+    }
 
     /* ---------------------------------------------
        SIZE + POSITION HELPERS (safe, 0-based)
@@ -100,14 +341,14 @@ export function init() {
 
     // Only change COL span (w), keep ROW span (h) fixed
     function pickSize(lastGeom) {
-        // Fixed row span: never changes once chosen
-        const h = Math.min(Math.max(BASE_H, MIN_H), MAX_H);
+        let hBase = lastGeom ? lastGeom.h : BASE_H;
+        hBase = Math.min(Math.max(hBase, MIN_H), MAX_H);
 
         // Start from previous width if present, otherwise base
         let wBase = lastGeom ? lastGeom.w : BASE_W;
         wBase = Math.min(Math.max(wBase, MIN_W), MAX_W);
 
-        // Wiggle width by ±1 within bounds
+        // Wiggle width/height by ±1 within bounds to keep placements lively
         const wCandidates = [];
         for (const dw of [-1, 1]) {
             const w = wBase + dw;
@@ -119,11 +360,19 @@ export function init() {
             wCandidates.push(wBase);
         }
 
+        const hCandidates = [];
+        for (const dh of [-1, 1]) {
+            const h = hBase + dh;
+            if (h >= MIN_H && h <= MAX_H) hCandidates.push(h);
+        }
+        if (!hCandidates.length) hCandidates.push(hBase);
+
         const w = rand(wCandidates);
+        const h = rand(hCandidates);
         return { w, h };
     }
 
-    function pickGeom(blockIndex, lastGeom) {
+    function pickGeom(blockIndex, lastGeom, opts = {}) {
         const block = BLOCKS[blockIndex];
         const { w, h } = pickSize(lastGeom);
 
@@ -142,28 +391,55 @@ export function init() {
         if (rowMax < rowMin) rowMax = rowMin;
         if (colMax < colMin) colMax = colMin;
 
-        const opts = [];
+        const optsList = [];
         for (let r = rowMin; r <= rowMax; r++) {
             for (let c = colMin; c <= colMax; c++) {
-                opts.push({ rowCell: r, colCell: c, w, h });
+                optsList.push({ rowCell: r, colCell: c, w, h });
             }
         }
 
-        let candidates = opts;
+        let candidates = optsList;
 
         if (lastGeom) {
-            // ❗️Avoid same anchor position, regardless of size
-            candidates = opts.filter(
+            // ❗️Avoid same anchor AND same size (identical grid-area)
+            candidates = optsList.filter(
                 (g) =>
                     !(
                         g.rowCell === lastGeom.rowCell &&
-                        g.colCell === lastGeom.colCell
+                        g.colCell === lastGeom.colCell &&
+                        g.w === lastGeom.w &&
+                        g.h === lastGeom.h
                     )
             );
 
-            // If the block is tiny and we *must* reuse the same anchor, fall back
+            // If that wiped out options, allow different size anywhere in block
             if (!candidates.length) {
-                candidates = opts;
+                candidates = optsList.filter(
+                    (g) => g.w !== lastGeom.w || g.h !== lastGeom.h
+                );
+            }
+
+            // If still empty (very rare), allow different anchor only
+            if (!candidates.length) {
+                candidates = optsList.filter(
+                    (g) =>
+                        g.rowCell !== lastGeom.rowCell ||
+                        g.colCell !== lastGeom.colCell
+                );
+            }
+
+            // Final fallback: everything (should basically never happen)
+            if (!candidates.length) {
+                candidates = optsList;
+            }
+        }
+
+        if (opts.avoidRows && opts.avoidRows.size) {
+            const filtered = candidates.filter(
+                (g) => !opts.avoidRows.has(g.rowCell)
+            );
+            if (filtered.length) {
+                candidates = filtered;
             }
         }
 
@@ -188,13 +464,35 @@ export function init() {
        IMAGE PICKING
     --------------------------------------------- */
 
-    function pickNewImageIndex(current) {
-        if (images.length <= 1) return current || 0;
-        let next = current;
-        while (next === current) {
-            next = randInt(0, images.length - 1);
+    function pickNewImageIndex(slot, reserved) {
+        if (!images.length) return 0;
+
+        const currentIdx = slot?.imgIndex ?? 0;
+        const currentSrc = slot?.el?.src || images[currentIdx] || null;
+
+        const visible = new Set(
+            slots
+                .map((s) => s.el?.src)
+                .filter(Boolean)
+        );
+
+        if (reserved?.images && reserved.images.size) {
+            reserved.images.forEach((src) => visible.add(src));
         }
-        return next;
+
+        const candidates = images
+            .map((src, i) => ({ src, i }))
+            .filter(({ src }) => src !== currentSrc && !visible.has(src));
+
+        if (candidates.length) {
+            return rand(candidates).i;
+        }
+
+        // Fallback: avoid currentSrc if possible
+        const nonCurrent = images.findIndex((src) => src !== currentSrc);
+        if (nonCurrent !== -1) return nonCurrent;
+
+        return currentIdx || 0;
     }
 
     /* ---------------------------------------------
@@ -248,7 +546,7 @@ export function init() {
        SWAP LOGIC — springy with clear motion
     --------------------------------------------- */
 
-    function swapSlot(slot, mode) {
+    function swapSlot(slot, mode, reserved) {
         if (!slot || slot.busy) return Promise.resolve();
 
         slot.busy = true;
@@ -262,14 +560,22 @@ export function init() {
         const OUT_DUR = mode === "manual" ? 0.45 : 0.4;
         const IN_DUR = mode === "manual" ? 0.65 : 0.55;
 
-        const newImgIndex = pickNewImageIndex(slot.imgIndex);
-        const geom = pickGeom(slot.blockIndex, slot.geom);
+        const newImgIndex = pickNewImageIndex(slot, reserved);
+        const nextSrc = images[newImgIndex];
+        if (!nextSrc) {
+            slot.busy = false;
+            return Promise.resolve();
+        }
+        const geom = pickGeom(slot.blockIndex, slot.geom, { avoidRows: reserved?.rows });
+
+        if (reserved?.images) reserved.images.add(nextSrc);
+        if (reserved?.rows) reserved.rows.add(geom.rowCell);
 
         const oldEl = slot.el;
         const newEl = document.createElement("img");
 
         newEl.className = "about_item";
-        newEl.src = images[newImgIndex];
+        newEl.src = nextSrc;
         newEl.style.opacity = "0";
         newEl.style.transform = `translateY(${cfg.inY}px) scale(${cfg.inS})`;
         applyGeom(newEl, geom);
@@ -334,7 +640,8 @@ export function init() {
         }
 
         // run manual swap on all slots
-        await Promise.all(slots.map((s) => swapSlot(s, "manual")));
+        const reserved = { images: new Set(), rows: new Set() };
+        await Promise.all(slots.map((s) => swapSlot(s, "manual", reserved)));
 
         // restart auto
         startNewSequence();
@@ -364,46 +671,66 @@ export function init() {
        INITIAL BUILD + DROP-IN
     --------------------------------------------- */
 
-    root.innerHTML = "";
-    const initialEls = [];
+    function runInitialDrop() {
+        if (!images.length) return Promise.resolve();
 
-    slots.forEach((slot) => {
-        const geom = pickGeom(slot.blockIndex, null);
-        const el = document.createElement("img");
+        root.innerHTML = "";
+        const initialEls = [];
 
-        el.className = "about_item";
-        el.src = images[slot.imgIndex];
-        el.style.opacity = "0";
-        el.style.transform = "translateY(-28px) scale(1.08)";
-        applyGeom(el, geom);
+        const firstBatch = images.length
+            ? shuffle(images).slice(0, Math.min(SLOT_COUNT, images.length))
+            : [];
 
-        slot.el = el;
-        slot.geom = geom;
+        const reservedRows = new Set();
 
-        root.appendChild(el);
-        initialEls.push(el);
-    });
+        slots.forEach((slot, i) => {
+            const geomUnique = pickGeom(slot.blockIndex, null, { avoidRows: reservedRows });
+            const el = document.createElement("img");
 
-    animate(
-        initialEls,
-        {
-            opacity: [0, 1],
-            y: [-28, 0],
-            scale: [1.08, 1],
-            rotate: [2, 0],
-        },
-        {
-            ...T_AUTO,
-            delay: stagger(0.12),
-        }
-    ).finished.then(() => {
-        initDone = true;
-        startNewSequence();
-        startAutoLoop();
-    });
+            const idx = firstBatch.length
+                ? i % firstBatch.length
+                : i % Math.max(images.length, 1);
+            const src = firstBatch[idx] || images[idx] || images[0];
+
+            el.className = "about_item";
+            el.src = src;
+            el.style.opacity = "0";
+            el.style.transform = "translateY(-28px) scale(1.08)";
+            applyGeom(el, geomUnique);
+
+            slot.el = el;
+            slot.geom = geomUnique;
+            slot.imgIndex = idx;
+
+            reservedRows.add(geomUnique.rowCell);
+
+            root.appendChild(el);
+            initialEls.push(el);
+        });
+
+        dropPromise = animate(
+            initialEls,
+            {
+                opacity: [0, 1],
+                y: [-28, 0],
+                scale: [1.08, 1],
+                rotate: [2, 0],
+            },
+            {
+                ...T_AUTO,
+                delay: stagger(0.12),
+            }
+        ).finished.then(() => {
+            initDone = true;
+            startNewSequence();
+            startAutoLoop();
+        });
+
+        return dropPromise;
+    }
 
     /* ---------------------------------------------
-       THEME + TITLE CLICKS
+       THEME + STATE SWITCHING
     --------------------------------------------- */
 
     const baseBg = section ? getComputedStyle(section).backgroundColor : "#fff";
@@ -413,14 +740,8 @@ export function init() {
             .trim() || baseBg;
     const svgBase = svg ? getComputedStyle(svg).color : null;
 
-    function applyTheme() {
-        const active = title?.querySelector(".about_title-active");
-        if (!active) return;
-
-        const wrappers = title?.querySelectorAll(".title-l") || [];
-        if (wrappers.length < 2) return;
-
-        const isPeople = active.closest(".title-l") === wrappers[0];
+    function applyTheme(stateKey = activeStateKey) {
+        const isPeople = stateKey === "people";
 
         if (section) {
             animate(
@@ -439,28 +760,87 @@ export function init() {
         }
     }
 
+    function handleStateChange(nextKey) {
+        const key = normalizeKey(nextKey);
+        const targetState = stateStore[key];
+        if (!targetState) return;
+        if (key === activeStateKey && initDone) return;
+
+        changeChain = changeChain
+            .then(async () => {
+                activeStateKey = key;
+                syncTitleActive(key);
+                applyTheme(key);
+
+                await ensureFirstBatch(targetState);
+                updateImagesFromState(targetState);
+
+                if (initDone) {
+                    await globalSwapManual();
+                } else if (dropPromise) {
+                    await dropPromise;
+                    await globalSwapManual();
+                } else if (images.length) {
+                    await runInitialDrop();
+                }
+
+                ensureAll(targetState).then(() => {
+                    if (activeStateKey === key) {
+                        updateImagesFromState(targetState);
+                    }
+                });
+
+                const otherKey = getOtherKey(key);
+                if (otherKey && stateStore[otherKey]) {
+                    ensureFirstBatch(stateStore[otherKey]);
+                    ensureAll(stateStore[otherKey]);
+                }
+            })
+            .catch((err) => console.warn("aboutHero state change", err));
+    }
+
     function setupTitle() {
         if (!title) return;
 
-        const wrappers = title.querySelectorAll(".title-l");
-        if (wrappers.length < 2) return;
+        const buttons = title.querySelectorAll("[data-about-hero]");
+        if (!buttons.length) return;
 
-        wrappers.forEach((w) => {
-            w.addEventListener("click", () => {
-                const active = title.querySelector(".about_title-active");
-                if (!active) return;
-                if (w.contains(active)) return;
-
-                active.classList.remove("about_title-active");
-                (w.firstElementChild || w).classList.add("about_title-active");
-
-                globalSwapManual();
-                applyTheme();
+        buttons.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                handleStateChange(btn.dataset.aboutHero);
             });
         });
 
-        applyTheme();
+        applyTheme(activeStateKey);
     }
 
-    setupTitle();
+    async function bootstrap() {
+        const firstState = stateStore[activeStateKey];
+        if (!firstState) return;
+
+        applyTheme(activeStateKey);
+
+        await ensureFirstBatch(firstState);
+        updateImagesFromState(firstState);
+
+        if (!images.length) return;
+
+        await runInitialDrop();
+
+        setupTitle();
+
+        ensureAll(firstState).then(() => {
+            if (activeStateKey === firstState.key) {
+                updateImagesFromState(firstState);
+            }
+
+            const otherKey = getOtherKey(firstState.key);
+            if (otherKey && stateStore[otherKey]) {
+                ensureFirstBatch(stateStore[otherKey]);
+                ensureAll(stateStore[otherKey]);
+            }
+        });
+    }
+
+    bootstrap().catch((err) => console.warn("aboutHero init", err));
 }

@@ -2,16 +2,14 @@ import { animate } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
 const SPRING_IN = {
     type: "spring",
-    stiffness: 900,
-    damping: 36,
-    mass: 1,
+    duration: 0.55,
+    bounce: 0.25,
 };
 
 const SPRING_OUT = {
     type: "spring",
-    stiffness: 900,
-    damping: 32,
-    mass: 0.9,
+    duration: 0.45,
+    bounce: 0.2,
 };
 
 export function init() {
@@ -106,8 +104,12 @@ function wireInteractions(media, img1, img2, img3) {
             hideImage(img3, 0);
             hideImage(img2, 0.05);
         } else if (nextState === 1) {
-            // Top half: show second, hide third
-            showImage(img2, 0);
+            // Top half: ensure second is in, hide third
+            // If coming from base (0 → 1), animate img2 in.
+            // If coming from bottom (2 → 1), img2 is already in, so only hide img3.
+            if (state === 0) {
+                showImage(img2, 0);
+            }
             hideImage(img3, 0);
         } else if (nextState === 2) {
             // Bottom half: show second and third
