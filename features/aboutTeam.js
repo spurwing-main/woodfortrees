@@ -1,6 +1,9 @@
 import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
-// Use visualDuration for easier coordination with other animations
+/* -------------------------------
+   Motion feel
+-------------------------------- */
+
 const SPRING_IN = {
     type: "spring",
     visualDuration: 0.4,
@@ -12,6 +15,71 @@ const SPRING_OUT = {
     visualDuration: 0.3,
     bounce: 0.15,
 };
+
+const HOVER_DELAY_MS = 80;
+
+// Respect OS-level "reduce motion"
+const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+let REDUCE_MOTION = mql.matches;
+
+mql.addEventListener("change", (e) => {
+    REDUCE_MOTION = e.matches;
+});
+
+/* -------------------------------
+   Shared animation control
+-------------------------------- */
+
+const activeAnimations = new WeakMap();
+
+function stopAnimation(el) {
+    const ctrl = activeAnimations.get(el);
+    if (!ctrl) return;
+    try {
+        ctrl.stop();
+    } catch (_) {
+        // ignore
+    }
+    activeAnimations.delete(el);
+}
+
+function animateImage(el, keyframes, options) {
+    // Reduced motion: jump to end state, no animation
+    if (REDUCE_MOTION) {
+        const finalOpacity = Array.isArray(keyframes.opacity)
+            ? keyframes.opacity[keyframes.opacity.length - 1]
+            : keyframes.opacity ?? 1;
+
+        const finalTransform = Array.isArray(keyframes.transform)
+            ? keyframes.transform[keyframes.transform.length - 1]
+            : keyframes.transform ?? "";
+
+        el.style.opacity = String(finalOpacity);
+        if (finalTransform) el.style.transform = finalTransform;
+        return Promise.resolve();
+    }
+
+    stopAnimation(el);
+
+    el.style.willChange = "transform, opacity";
+
+    const controls = animate(el, keyframes, options);
+    activeAnimations.set(el, controls);
+
+    return controls.finished
+        .catch(() => { })
+        .then(() => {
+            // Only clean up if this is still the latest animation
+            if (activeAnimations.get(el) === controls) {
+                activeAnimations.delete(el);
+                el.style.willChange = "auto";
+            }
+        });
+}
+
+/* -------------------------------
+   Public init
+-------------------------------- */
 
 export function init() {
     const root = document.querySelector(".section_team");
@@ -34,14 +102,13 @@ export function init() {
     });
 }
 
-/* ----------------------------------------
-   BASE SETUP
----------------------------------------- */
+/* -------------------------------
+   Base transforms
+-------------------------------- */
 
 function captureBaseTransform(img) {
-    const cs = getComputedStyle(img);
-    const t = cs.transform === "none" ? "" : cs.transform;
-    img.dataset.baseTransform = t;
+    const t = getComputedStyle(img).transform;
+    img.dataset.baseTransform = t === "none" ? "" : t;
 }
 
 function baseTransform(img) {
@@ -51,13 +118,18 @@ function baseTransform(img) {
 function composeTransform(img, dy, scale) {
     const base = baseTransform(img);
     const extra = ` translateY(${dy}px) scale(${scale})`;
-    return (base ? base : "") + extra;
+    return (base || "") + extra;
 }
 
+/* -------------------------------
+   Initial stack layout
+-------------------------------- */
+
 function setupStack(media, img1, img2, img3) {
-    media.style.position = media.style.position || "relative";
-    // show rotated edges
-    media.style.overflow = "visible";
+    if (!media.style.position) {
+        media.style.position = "relative";
+    }
+    media.style.overflow = "visible"; // show rotated edges
 
     [img1, img2, img3].forEach((img, i) => {
         captureBaseTransform(img);
@@ -68,18 +140,18 @@ function setupStack(media, img1, img2, img3) {
             width: "100%",
             height: "100%",
             objectFit: "cover",
-            willChange: "transform, opacity",
             transformOrigin: "center center",
+            willChange: "transform, opacity",
             zIndex: String(1 + i), // 1 = base, 2 = mid, 3 = top
         });
     });
 
-    // is-1 visible on load, keep its rotation
+    // is-1 visible on load
     img1.style.opacity = "1";
     img1.style.visibility = "visible";
     img1.style.transform = composeTransform(img1, 0, 1);
 
-    // is-2 and is-3 hidden just above, ready to drop, keep their rotations
+    // is-2 and is-3 hidden above, ready to drop
     [img2, img3].forEach((img) => {
         img.style.opacity = "0";
         img.style.visibility = "hidden";
@@ -87,34 +159,85 @@ function setupStack(media, img1, img2, img3) {
     });
 }
 
-/* ----------------------------------------
-   INTERACTION + STATE
+/* -------------------------------
+   State + interactions
    state 0: only is-1
-   state 1: is-1 + is-2
-   state 2: is-1 + is-2 + is-3
----------------------------------------- */
+   state 1: show is-2
+   state 2: show is-2 and is-3
+-------------------------------- */
 
 function wireInteractions(media, img1, img2, img3) {
     let state = 0;
     let moveHandler = null;
+    let rafId = null;
+    let pendingY = null;
+    let pendingState = null;
+    let stateTimer = null;
 
-    function goTo(nextState, { fromEnter = false } = {}) {
-        if (nextState === state) return;
+    function clearHoverState() {
+        if (moveHandler) {
+            media.removeEventListener("pointermove", moveHandler);
+            moveHandler = null;
+        }
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+        if (stateTimer) {
+            clearTimeout(stateTimer);
+            stateTimer = null;
+        }
+        pendingState = null;
+        pendingY = null;
+    }
+
+    function pointerStateForY(clientY) {
+        const rect = media.getBoundingClientRect();
+        const y = clientY - rect.top;
+        if (y < 0 || y > rect.height) return null;
+        return y < rect.height / 2 ? 1 : 2;
+    }
+
+    function scheduleState(nextState, opts) {
+        if (nextState == null) return;
+        if (nextState === state && !pendingState) return;
+
+        pendingState = { nextState, opts };
+
+        if (stateTimer) return;
+
+        stateTimer = setTimeout(() => {
+            stateTimer = null;
+            if (!pendingState) return;
+
+            const { nextState: targetState, opts: targetOpts } = pendingState;
+            pendingState = null;
+            goToState(targetState, targetOpts);
+        }, HOVER_DELAY_MS);
+    }
+
+    function processPointerY(y, opts) {
+        const s = pointerStateForY(y);
+        scheduleState(s, opts);
+    }
+
+    function goToState(nextState, { fromEnter = false } = {}) {
+        if (nextState === state || nextState == null) return;
 
         if (nextState === 0) {
-            // Reset to just base image
+            // Reset to base
             hideImage(img3, 0);
             hideImage(img2, 0.05);
         } else if (nextState === 1) {
-            // Top half: ensure second is in, hide third
+            // Top half → ensure second in, hide third
             if (state === 0) {
                 showImage(img2, 0);
             }
             hideImage(img3, 0);
         } else if (nextState === 2) {
-            // Bottom half: show second and third
+            // Bottom half → show second and third
             if (state === 0 && fromEnter) {
-                // Started directly in bottom half → drop both together
+                // Entered directly in bottom half → drop both
                 showImage(img2, 0);
                 showImage(img3, 0.06);
             } else {
@@ -126,48 +249,38 @@ function wireInteractions(media, img1, img2, img3) {
         state = nextState;
     }
 
-    function pointerStateForY(clientY) {
-        const rect = media.getBoundingClientRect();
-        const y = clientY - rect.top;
-        if (y < 0 || y > rect.height) return null;
-        return y < rect.height / 2 ? 1 : 2;
-    }
-
-    // Use Motion's hover() for cleaner gesture handling
-    // It filters out fake touch-emulated hover events automatically
+    // Let Motion's hover() manage pointer enter/leave
     hover(media, (element, startEvent) => {
-        const initialState = pointerStateForY(startEvent.clientY);
-        if (initialState != null) {
-            goTo(initialState, { fromEnter: true });
-        }
+        processPointerY(startEvent.clientY, { fromEnter: true });
 
         // Track pointer movement while hovering
         moveHandler = (e) => {
-            const s = pointerStateForY(e.clientY);
-            if (s != null) goTo(s);
+            pendingY = e.clientY;
+            if (rafId) return;
+
+            rafId = requestAnimationFrame(() => {
+                rafId = null;
+                processPointerY(pendingY);
+            });
         };
         media.addEventListener("pointermove", moveHandler);
 
-        // Return cleanup function called on hover end
+        // Cleanup when hover ends
         return () => {
-            if (moveHandler) {
-                media.removeEventListener("pointermove", moveHandler);
-                moveHandler = null;
-            }
-            goTo(0);
+            clearHoverState();
+            goToState(0);
         };
     });
 }
 
-/* ----------------------------------------
-   ANIMATION HELPERS
-   (keep base rotation, animate offset+scale)
----------------------------------------- */
+/* -------------------------------
+   Show / hide helpers
+-------------------------------- */
 
 function showImage(img, delay = 0) {
     img.style.visibility = "visible";
 
-    const controls = animate(
+    return animateImage(
         img,
         {
             opacity: [0, 1],
@@ -181,19 +294,12 @@ function showImage(img, delay = 0) {
             delay,
         }
     );
-
-    // Clean up willChange after animation completes
-    controls.finished.then(() => {
-        img.style.willChange = "auto";
-    });
 }
 
 function hideImage(img, delay = 0) {
-    if (img.style.visibility === "hidden") return;
+    if (img.style.visibility === "hidden") return Promise.resolve();
 
-    img.style.willChange = "transform, opacity";
-
-    const controls = animate(
+    return animateImage(
         img,
         {
             opacity: [1, 0],
@@ -206,11 +312,8 @@ function hideImage(img, delay = 0) {
             ...SPRING_OUT,
             delay,
         }
-    );
-
-    controls.finished.then(() => {
+    ).then(() => {
         img.style.visibility = "hidden";
-        img.style.willChange = "auto";
         // Reset back up ready for the next "drop"
         img.style.transform = composeTransform(img, -24, 0.96);
     });
