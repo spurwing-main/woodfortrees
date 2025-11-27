@@ -1,51 +1,59 @@
 import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
 /* -------------------------------
-   Motion feel
+   motion config
 -------------------------------- */
 
-const SPRING_IN = {
+const springIn = {
     type: "spring",
     visualDuration: 0.4,
     bounce: 0.3,
 };
 
-const SPRING_OUT = {
+const springOut = {
     type: "spring",
     visualDuration: 0.3,
     bounce: 0.15,
 };
 
-const HOVER_DELAY_MS = 80;
+const hoverIntentDelayMs = 250;
+const stackEnterY = -24;
+const stackEnterScale = 0.96;
+const stackExitY = 12;
+const stackExitScale = 0.97;
 
-// Respect OS-level "reduce motion"
-const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
-let REDUCE_MOTION = mql.matches;
+/* -------------------------------
+   reduced motion
+-------------------------------- */
 
-mql.addEventListener("change", (e) => {
-    REDUCE_MOTION = e.matches;
+const reduceMotionMediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduceMotion = reduceMotionMediaQuery.matches;
+
+reduceMotionMediaQuery.addEventListener("change", (event) => {
+    reduceMotion = event.matches;
 });
 
 /* -------------------------------
-   Shared animation control
+   shared animation control
 -------------------------------- */
 
 const activeAnimations = new WeakMap();
 
-function stopAnimation(el) {
-    const ctrl = activeAnimations.get(el);
-    if (!ctrl) return;
+function stopAnimation(element) {
+    const controls = activeAnimations.get(element);
+    if (!controls) return;
+
     try {
-        ctrl.stop();
-    } catch (_) {
-        // ignore
+        controls.stop();
+    } catch {
+        // ignore already-stopped animations
     }
-    activeAnimations.delete(el);
+
+    activeAnimations.delete(element);
 }
 
-function animateImage(el, keyframes, options) {
-    // Reduced motion: jump to end state, no animation
-    if (REDUCE_MOTION) {
+function animateImage(element, keyframes, options) {
+    if (reduceMotion) {
         const finalOpacity = Array.isArray(keyframes.opacity)
             ? keyframes.opacity[keyframes.opacity.length - 1]
             : keyframes.opacity ?? 1;
@@ -54,31 +62,30 @@ function animateImage(el, keyframes, options) {
             ? keyframes.transform[keyframes.transform.length - 1]
             : keyframes.transform ?? "";
 
-        el.style.opacity = String(finalOpacity);
-        if (finalTransform) el.style.transform = finalTransform;
+        element.style.opacity = String(finalOpacity);
+        if (finalTransform) element.style.transform = finalTransform;
         return Promise.resolve();
     }
 
-    stopAnimation(el);
+    stopAnimation(element);
 
-    el.style.willChange = "transform, opacity";
+    element.style.willChange = "transform, opacity";
 
-    const controls = animate(el, keyframes, options);
-    activeAnimations.set(el, controls);
+    const controls = animate(element, keyframes, options);
+    activeAnimations.set(element, controls);
 
-    return controls.finished
+    return Promise.resolve(controls)
         .catch(() => { })
         .then(() => {
-            // Only clean up if this is still the latest animation
-            if (activeAnimations.get(el) === controls) {
-                activeAnimations.delete(el);
-                el.style.willChange = "auto";
+            if (activeAnimations.get(element) === controls) {
+                activeAnimations.delete(element);
+                element.style.willChange = "auto";
             }
         });
 }
 
 /* -------------------------------
-   Public init
+   public init
 -------------------------------- */
 
 export function init() {
@@ -103,38 +110,38 @@ export function init() {
 }
 
 /* -------------------------------
-   Base transforms
+   base transforms
 -------------------------------- */
 
-function captureBaseTransform(img) {
-    const t = getComputedStyle(img).transform;
-    img.dataset.baseTransform = t === "none" ? "" : t;
+function captureBaseTransform(image) {
+    const transform = getComputedStyle(image).transform;
+    image.dataset.baseTransform = transform === "none" ? "" : transform;
 }
 
-function baseTransform(img) {
-    return img.dataset.baseTransform || "";
+function baseTransform(image) {
+    return image.dataset.baseTransform || "";
 }
 
-function composeTransform(img, dy, scale) {
-    const base = baseTransform(img);
+function composeTransform(image, dy, scale) {
+    const base = baseTransform(image);
     const extra = ` translateY(${dy}px) scale(${scale})`;
-    return (base || "") + extra;
+    return base + extra;
 }
 
 /* -------------------------------
-   Initial stack layout
+   initial stack layout
 -------------------------------- */
 
 function setupStack(media, img1, img2, img3) {
     if (!media.style.position) {
         media.style.position = "relative";
     }
-    media.style.overflow = "visible"; // show rotated edges
+    media.style.overflow = "visible";
 
-    [img1, img2, img3].forEach((img, i) => {
-        captureBaseTransform(img);
+    [img1, img2, img3].forEach((image, index) => {
+        captureBaseTransform(image);
 
-        Object.assign(img.style, {
+        Object.assign(image.style, {
             position: "absolute",
             inset: "0",
             width: "100%",
@@ -142,28 +149,28 @@ function setupStack(media, img1, img2, img3) {
             objectFit: "cover",
             transformOrigin: "center center",
             willChange: "transform, opacity",
-            zIndex: String(1 + i), // 1 = base, 2 = mid, 3 = top
+            zIndex: String(1 + index),
         });
     });
 
-    // is-1 visible on load
+    // top card visible on load
     img1.style.opacity = "1";
     img1.style.visibility = "visible";
     img1.style.transform = composeTransform(img1, 0, 1);
 
-    // is-2 and is-3 hidden above, ready to drop
-    [img2, img3].forEach((img) => {
-        img.style.opacity = "0";
-        img.style.visibility = "hidden";
-        img.style.transform = composeTransform(img, -24, 0.96);
+    // others hidden above, ready to drop
+    [img2, img3].forEach((image) => {
+        image.style.opacity = "0";
+        image.style.visibility = "hidden";
+        image.style.transform = composeTransform(image, stackEnterY, stackEnterScale);
     });
 }
 
 /* -------------------------------
-   State + interactions
-   state 0: only is-1
-   state 1: show is-2
-   state 2: show is-2 and is-3
+   state + interactions
+   state 0: only img1
+   state 1: img1 + img2
+   state 2: img1 + img2 + img3
 -------------------------------- */
 
 function wireInteractions(media, img1, img2, img3) {
@@ -171,8 +178,16 @@ function wireInteractions(media, img1, img2, img3) {
     let moveHandler = null;
     let rafId = null;
     let pendingY = null;
-    let pendingState = null;
-    let stateTimer = null;
+    let intentZone = 0; // 0 = base, 1 = top half, 2 = bottom half
+    let intentTimerId = null;
+
+    function clearIntent() {
+        if (intentTimerId) {
+            clearTimeout(intentTimerId);
+            intentTimerId = null;
+        }
+        intentZone = 0;
+    }
 
     function clearHoverState() {
         if (moveHandler) {
@@ -183,89 +198,90 @@ function wireInteractions(media, img1, img2, img3) {
             cancelAnimationFrame(rafId);
             rafId = null;
         }
-        if (stateTimer) {
-            clearTimeout(stateTimer);
-            stateTimer = null;
-        }
-        pendingState = null;
         pendingY = null;
+        clearIntent();
     }
 
-    function pointerStateForY(clientY) {
+    function pointerZoneForY(clientY) {
         const rect = media.getBoundingClientRect();
         const y = clientY - rect.top;
-        if (y < 0 || y > rect.height) return null;
+
+        if (y < 0 || y > rect.height) return 0;
         return y < rect.height / 2 ? 1 : 2;
     }
 
-    function scheduleState(nextState, opts) {
-        if (nextState == null) return;
-        if (nextState === state && !pendingState) return;
+    function setIntentZone(zone) {
+        if (zone === intentZone) return;
 
-        pendingState = { nextState, opts };
+        intentZone = zone;
 
-        if (stateTimer) return;
+        if (intentTimerId) {
+            clearTimeout(intentTimerId);
+            intentTimerId = null;
+        }
 
-        stateTimer = setTimeout(() => {
-            stateTimer = null;
-            if (!pendingState) return;
+        if (zone === 0) return;
 
-            const { nextState: targetState, opts: targetOpts } = pendingState;
-            pendingState = null;
-            goToState(targetState, targetOpts);
-        }, HOVER_DELAY_MS);
+        intentTimerId = setTimeout(() => {
+            intentTimerId = null;
+            goToState(zone);
+        }, hoverIntentDelayMs);
     }
 
-    function processPointerY(y, opts) {
-        const s = pointerStateForY(y);
-        scheduleState(s, opts);
+    function processPointerY(clientY) {
+        const zone = pointerZoneForY(clientY);
+        setIntentZone(zone);
     }
 
-    function goToState(nextState, { fromEnter = false } = {}) {
-        if (nextState === state || nextState == null) return;
+    function goToState(nextState) {
+        if (nextState === state) return;
 
-        if (nextState === 0) {
-            // Reset to base
-            hideImage(img3, 0);
-            hideImage(img2, 0.05);
-        } else if (nextState === 1) {
-            // Top half → ensure second in, hide third
-            if (state === 0) {
-                showImage(img2, 0);
+        switch (nextState) {
+            case 0: {
+                hideImage(img3, 0);
+                hideImage(img2, 0.05);
+                break;
             }
-            hideImage(img3, 0);
-        } else if (nextState === 2) {
-            // Bottom half → show second and third
-            if (state === 0 && fromEnter) {
-                // Entered directly in bottom half → drop both
-                showImage(img2, 0);
-                showImage(img3, 0.06);
-            } else {
-                if (state === 0) showImage(img2, 0);
-                showImage(img3, 0);
+            case 1: {
+                if (state === 0) {
+                    showImage(img2, 0);
+                } else if (state === 2) {
+                    hideImage(img3, 0);
+                }
+                break;
             }
+            case 2: {
+                if (state === 0) {
+                    showImage(img2, 0);
+                    showImage(img3, 0.06);
+                } else if (state === 1) {
+                    showImage(img3, 0);
+                }
+                break;
+            }
+            default:
+                return;
         }
 
         state = nextState;
     }
 
-    // Let Motion's hover() manage pointer enter/leave
     hover(media, (element, startEvent) => {
-        processPointerY(startEvent.clientY, { fromEnter: true });
+        processPointerY(startEvent.clientY);
 
-        // Track pointer movement while hovering
-        moveHandler = (e) => {
-            pendingY = e.clientY;
+        moveHandler = (event) => {
+            pendingY = event.clientY;
             if (rafId) return;
 
             rafId = requestAnimationFrame(() => {
                 rafId = null;
+                if (pendingY == null) return;
                 processPointerY(pendingY);
             });
         };
+
         media.addEventListener("pointermove", moveHandler);
 
-        // Cleanup when hover ends
         return () => {
             clearHoverState();
             goToState(0);
@@ -274,47 +290,46 @@ function wireInteractions(media, img1, img2, img3) {
 }
 
 /* -------------------------------
-   Show / hide helpers
+   show / hide helpers
 -------------------------------- */
 
-function showImage(img, delay = 0) {
-    img.style.visibility = "visible";
+function showImage(image, delay = 0) {
+    image.style.visibility = "visible";
 
     return animateImage(
-        img,
+        image,
         {
             opacity: [0, 1],
             transform: [
-                composeTransform(img, -24, 0.96),
-                composeTransform(img, 0, 1),
+                composeTransform(image, stackEnterY, stackEnterScale),
+                composeTransform(image, 0, 1),
             ],
         },
         {
-            ...SPRING_IN,
+            ...springIn,
             delay,
         }
     );
 }
 
-function hideImage(img, delay = 0) {
-    if (img.style.visibility === "hidden") return Promise.resolve();
+function hideImage(image, delay = 0) {
+    if (image.style.visibility === "hidden") return Promise.resolve();
 
     return animateImage(
-        img,
+        image,
         {
             opacity: [1, 0],
             transform: [
-                composeTransform(img, 0, 1),
-                composeTransform(img, 12, 0.97),
+                composeTransform(image, 0, 1),
+                composeTransform(image, stackExitY, stackExitScale),
             ],
         },
         {
-            ...SPRING_OUT,
+            ...springOut,
             delay,
         }
     ).then(() => {
-        img.style.visibility = "hidden";
-        // Reset back up ready for the next "drop"
-        img.style.transform = composeTransform(img, -24, 0.96);
+        image.style.visibility = "hidden";
+        image.style.transform = composeTransform(image, stackEnterY, stackEnterScale);
     });
 }
