@@ -1,10 +1,10 @@
 // Motion-first hero
-// Requires Motion CDN:
+// requires motion cdn:
 // <script type="module" src="https://cdn.jsdelivr.net/npm/motion@latest/+esm"></script>
 
 import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
-const CACHE = (window.aboutHeroImageCache =
+const cache = (window.aboutHeroImageCache =
     window.aboutHeroImageCache || new Map());
 
 let mounted = false;
@@ -126,24 +126,24 @@ export function init() {
     const prefersReduced = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
     );
-    let REDUCE = prefersReduced.matches;
+    let reduceMotion = prefersReduced.matches;
 
     const onReduceChange = (e) => {
-        REDUCE = e.matches;
+        reduceMotion = e.matches;
     };
     prefersReduced.addEventListener("change", onReduceChange);
     addCleanup(() =>
         prefersReduced.removeEventListener("change", onReduceChange)
     );
 
-    const SPRING_MANUAL = { type: "spring", stiffness: 900, damping: 40 };
-    const SPRING_AUTO = { type: "spring", stiffness: 540, damping: 52 };
-    const THEME_T = { duration: 0.35, ease: "easeOut" };
+    const springManual = { type: "spring", stiffness: 900, damping: 40 };
+    const springAuto = { type: "spring", stiffness: 540, damping: 52 };
+    const themeTiming = { duration: 0.35, ease: "easeOut" };
 
-    const AUTO_MIN = 1200;
-    const AUTO_MAX = 2600;
+    const autoMin = 1200;
+    const autoMax = 2600;
     const autoDelay = () =>
-        AUTO_MIN + Math.random() * (AUTO_MAX - AUTO_MIN);
+        autoMin + Math.random() * (autoMax - autoMin);
 
     function applyFinal(target, keyframes) {
         const apply = (el) => {
@@ -176,7 +176,7 @@ export function init() {
     }
 
     function runAnim(target, keyframes, options) {
-        if (REDUCE) {
+        if (reduceMotion) {
             applyFinal(target, keyframes);
             return Promise.resolve();
         }
@@ -185,13 +185,13 @@ export function init() {
 
     // grid config
 
-    const GRID_ROWS = 30;
-    const GRID_COLS = 30;
+    const gridRows = 30;
+    const gridCols = 30;
 
-    const BLOCK_W = 10;
-    const BLOCK_H = 15;
+    const blockW = 10;
+    const blockH = 15;
 
-    const BLOCKS = [
+    const blocks = [
         { r0: 0, c0: 0 },
         { r0: 0, c0: 10 },
         { r0: 0, c0: 20 },
@@ -200,16 +200,16 @@ export function init() {
         { r0: 15, c0: 20 },
     ];
 
-    const SLOT_COUNT = BLOCKS.length;
+    const slotCount = blocks.length;
 
-    const BASE_W = 6;
-    const BASE_H = 10;
-    const MIN_W = 4;
-    const MAX_W = Math.min(8, BLOCK_W);
-    const MIN_H = 8;
-    const MAX_H = Math.min(12, BLOCK_H);
+    const baseW = 6;
+    const baseH = 10;
+    const minW = 4;
+    const maxW = Math.min(8, blockW);
+    const minH = 8;
+    const maxH = Math.min(12, blockH);
 
-    const slots = Array.from({ length: SLOT_COUNT }, (_, i) => ({
+    const slots = Array.from({ length: slotCount }, (_, i) => ({
         index: i,
         blockIndex: i,
         el: null,
@@ -236,7 +236,7 @@ export function init() {
     function preload(src) {
         if (!src) return Promise.reject(new Error("empty src"));
 
-        let rec = CACHE.get(src);
+        let rec = cache.get(src);
         if (rec) {
             if (rec.status === "loaded") {
                 return rec.promise || Promise.resolve(src);
@@ -262,7 +262,7 @@ export function init() {
             img.src = src;
         });
 
-        CACHE.set(src, rec);
+        cache.set(src, rec);
         rec.promise.catch(() => { });
         return rec.promise;
     }
@@ -271,7 +271,7 @@ export function init() {
         if (!state) return Promise.resolve();
         if (state.firstPromise) return state.firstPromise;
 
-        const need = Math.min(SLOT_COUNT, state.pool.length);
+        const need = Math.min(slotCount, state.pool.length);
 
         state.firstPromise = new Promise((resolve) => {
             let success = state.loaded.size;
@@ -327,43 +327,43 @@ export function init() {
         const loaded = Array.from(state.loaded);
         const usable = state.pool.filter((src) => !state.failed.has(src));
 
-        if (loaded.length >= SLOT_COUNT) {
-            return loaded.slice(0, SLOT_COUNT);
+        if (loaded.length >= slotCount) {
+            return loaded.slice(0, slotCount);
         }
 
         if (loaded.length) {
             const out = loaded.slice();
             let i = 0;
-            while (out.length < SLOT_COUNT && usable.length) {
+            while (out.length < slotCount && usable.length) {
                 out.push(usable[i % usable.length]);
                 i++;
             }
             return out;
         }
 
-        return usable.slice(0, SLOT_COUNT);
+        return usable.slice(0, slotCount);
     }
 
     // geometry
 
     function pickSize(lastGeom) {
-        const baseH = lastGeom ? lastGeom.h : BASE_H;
-        const baseW = lastGeom ? lastGeom.w : BASE_W;
+        const baseHeight = lastGeom ? lastGeom.h : baseH;
+        const baseWidth = lastGeom ? lastGeom.w : baseW;
 
-        const hBase = clamp(baseH, MIN_H, MAX_H);
-        const wBase = clamp(baseW, MIN_W, MAX_W);
+        const hBase = clamp(baseHeight, minH, maxH);
+        const wBase = clamp(baseWidth, minW, maxW);
 
         const wOpts = [];
         for (const dw of [-1, 1]) {
             const w = wBase + dw;
-            if (w >= MIN_W && w <= MAX_W) wOpts.push(w);
+            if (w >= minW && w <= maxW) wOpts.push(w);
         }
         if (!wOpts.length) wOpts.push(wBase);
 
         const hOpts = [];
         for (const dh of [-1, 1]) {
             const h = hBase + dh;
-            if (h >= MIN_H && h <= MAX_H) hOpts.push(h);
+            if (h >= minH && h <= maxH) hOpts.push(h);
         }
         if (!hOpts.length) hOpts.push(hBase);
 
@@ -371,18 +371,18 @@ export function init() {
     }
 
     function pickGeom(blockIndex, lastGeom, opts = {}) {
-        const block = BLOCKS[blockIndex];
+        const block = blocks[blockIndex];
         const { w, h } = pickSize(lastGeom);
 
         let rowMin = block.r0;
-        let rowMax = block.r0 + BLOCK_H - h;
+        let rowMax = block.r0 + blockH - h;
         let colMin = block.c0;
-        let colMax = block.c0 + BLOCK_W - w;
+        let colMax = block.c0 + blockW - w;
 
-        rowMin = clamp(rowMin, 0, GRID_ROWS - h);
-        rowMax = clamp(rowMax, 0, GRID_ROWS - h);
-        colMin = clamp(colMin, 0, GRID_COLS - w);
-        colMax = clamp(colMax, 0, GRID_COLS - w);
+        rowMin = clamp(rowMin, 0, gridRows - h);
+        rowMax = clamp(rowMax, 0, gridRows - h);
+        colMin = clamp(colMin, 0, gridCols - w);
+        colMax = clamp(colMax, 0, gridCols - w);
 
         const options = [];
         for (let r = rowMin; r <= rowMax; r++) {
@@ -493,9 +493,9 @@ export function init() {
                 ? { outY: 26, outS: 0.88, inY: -32, inS: 1.09 }
                 : { outY: 12, outS: 0.95, inY: -18, inS: 1.03 };
 
-        const spring = mode === "manual" ? SPRING_MANUAL : SPRING_AUTO;
-        const OUT_DUR = mode === "manual" ? 0.42 : 0.36;
-        const IN_DUR = mode === "manual" ? 0.6 : 0.5;
+        const spring = mode === "manual" ? springManual : springAuto;
+        const outDuration = mode === "manual" ? 0.42 : 0.36;
+        const inDuration = mode === "manual" ? 0.6 : 0.5;
 
         const newIndex = pickNewIndex(slot, reserved);
         const nextSrc = images[newIndex];
@@ -529,7 +529,7 @@ export function init() {
                     scale: [1, cfg.outS],
                     rotate: [0, 2],
                 },
-                { ...spring, duration: OUT_DUR }
+                { ...spring, duration: outDuration }
             ).then(() => oldEl.remove())
             : Promise.resolve();
 
@@ -543,7 +543,7 @@ export function init() {
                         scale: [cfg.inS, 0.97, 1],
                         rotate: [-2, 0],
                     },
-                    { ...spring, duration: IN_DUR }
+                    { ...spring, duration: inDuration }
                 )
             )
             .then(() => {
@@ -581,7 +581,7 @@ export function init() {
     let lastIdx = null;
 
     function makeSeq() {
-        const base = shuffle([...Array(SLOT_COUNT).keys()]);
+        const base = shuffle([...Array(slotCount).keys()]);
         if (lastIdx != null && base[0] === lastIdx && base.length > 1) {
             const swapPos = 1 + ((Math.random() * (base.length - 1)) | 0);
             [base[0], base[swapPos]] = [base[swapPos], base[0]];
@@ -653,8 +653,8 @@ export function init() {
                 rotate: [2, 0],
             },
             {
-                ...SPRING_AUTO,
-                delay: REDUCE ? 0 : stagger(0.08, { from: "center" }),
+                ...springAuto,
+                delay: reduceMotion ? 0 : stagger(0.08, { from: "center" }),
             }
         ).then(() => {
             initDone = true;
@@ -685,7 +685,7 @@ export function init() {
                 {
                     backgroundColor: isPeople ? pink : baseBg,
                 },
-                THEME_T
+                themeTiming
             );
         }
 
@@ -695,7 +695,7 @@ export function init() {
                 {
                     color: isPeople ? baseBg : svgBase,
                 },
-                THEME_T
+                themeTiming
             );
         }
     }

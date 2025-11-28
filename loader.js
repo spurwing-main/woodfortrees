@@ -9,6 +9,10 @@ function getKit() {
         w.sitekit.features = {}
     }
 
+    if (!w.sitekit.utils) {
+        w.sitekit.utils = {}
+    }
+
     return w.sitekit
 }
 
@@ -37,6 +41,13 @@ const featureList = [
     { name: 'aboutHero', load: () => import('./features/aboutHero.js') },
     { name: 'aboutTeam', load: () => import('./features/aboutTeam.js') },
     { name: 'expertTabs', load: () => import('./features/expertTabs.js') },
+    { name: 'testimonialSlider', load: () => import('./features/testimonialSlider.js') },
+    { name: 'howSlider', load: () => import('./features/howSlider.js') },
+]
+
+// list of utils to load
+const utilList = [
+    { name: 'breakpoints', load: () => import('./utils/breakpoints.js') },
 ]
 
 let bootStarted = false
@@ -62,6 +73,20 @@ async function boot() {
             }
         } catch (error) {
             console.warn('sitekit: feature failed', feature.name, error)
+        }
+    }
+
+    // utils load after features; they may emit events globally
+    for (const util of utilList) {
+        try {
+            const mod = await util.load()
+            kit.utils[util.name] = mod
+
+            if (typeof mod.init === 'function') {
+                mod.init()
+            }
+        } catch (error) {
+            console.warn('sitekit: util failed', util.name, error)
         }
     }
 }

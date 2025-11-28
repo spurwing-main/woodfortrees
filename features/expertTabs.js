@@ -20,7 +20,7 @@ export function init() {
 
     const total = Math.min(tabs.length, panels.length)
 
-    // Initial active index from DOM, fallback to 0
+    // Initial active index from dom, fallback to 0
     let activeIndex = tabs.findIndex((tab) => tab.classList.contains("is-active"))
     if (activeIndex < 0 || activeIndex >= total) activeIndex = 0
 

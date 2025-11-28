@@ -1,7 +1,7 @@
 import tippy from 'https://cdn.jsdelivr.net/npm/tippy.js@6/+esm';
 
-// Load required CSS
-function loadCSS(href) {
+// load required css
+function loadCss(href) {
     if (!document.querySelector(`link[href="${href}"]`)) {
         const link = document.createElement('link');
         link.rel = 'stylesheet';
@@ -10,8 +10,8 @@ function loadCSS(href) {
     }
 }
 
-loadCSS('https://unpkg.com/tippy.js@6/dist/tippy.css');
-loadCSS('https://unpkg.com/tippy.js@6/animations/scale.css');
+loadCss('https://unpkg.com/tippy.js@6/dist/tippy.css');
+loadCss('https://unpkg.com/tippy.js@6/animations/scale.css');
 
 export function init() {
 
