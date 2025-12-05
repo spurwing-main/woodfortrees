@@ -145,6 +145,43 @@ export function init() {
     const autoDelay = () =>
         autoMin + Math.random() * (autoMax - autoMin);
 
+    function applyWillChange(target, keyframes) {
+        const props = [];
+        const hasTransform =
+            "transform" in keyframes ||
+            "x" in keyframes ||
+            "y" in keyframes ||
+            "scale" in keyframes ||
+            "rotate" in keyframes;
+
+        if (hasTransform) props.push("transform");
+        if ("opacity" in keyframes) props.push("opacity");
+        if ("clipPath" in keyframes) props.push("clipPath");
+        if ("filter" in keyframes) props.push("filter");
+
+        if (!props.length) return null;
+
+        const value = props.join(", ");
+        if (Array.isArray(target)) {
+            target.forEach((el) => {
+                if (el?.style) el.style.willChange = value;
+            });
+        } else if (target?.style) {
+            target.style.willChange = value;
+        }
+        return value;
+    }
+
+    function clearWillChange(target) {
+        if (Array.isArray(target)) {
+            target.forEach((el) => {
+                if (el?.style) el.style.willChange = "";
+            });
+        } else if (target?.style) {
+            target.style.willChange = "";
+        }
+    }
+
     function applyFinal(target, keyframes) {
         const apply = (el) => {
             const transforms = [];
@@ -180,7 +217,14 @@ export function init() {
             applyFinal(target, keyframes);
             return Promise.resolve();
         }
-        return animate(target, keyframes, options).finished.catch(() => { });
+
+        const applied = applyWillChange(target, keyframes);
+
+        return animate(target, keyframes, options).finished
+            .catch(() => { })
+            .finally(() => {
+                if (applied) clearWillChange(target);
+            });
     }
 
     // grid config

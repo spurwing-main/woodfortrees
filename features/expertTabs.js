@@ -48,24 +48,23 @@ export function init() {
         panel.setAttribute("aria-hidden", "false")
         panel.style.pointerEvents = "auto"
 
-        // start low, blurred, transparent
-        panel.style.opacity = "0"
-        panel.style.transform = "translateY(12px)"
-        panel.style.filter = "blur(8px)"
+        panel.style.willChange = "transform, opacity, filter"
 
         animate(
             panel,
             {
-                opacity: 1,
-                transform: "translateY(0px)",
-                filter: "blur(0px)"
+                opacity: [panel.style.opacity || 0, 1],
+                transform: [panel.style.transform || "translateY(12px)", "translateY(0px)"],
+                filter: [panel.style.filter || "blur(8px)", "blur(0px)"]
             },
             {
                 type: "spring",
                 visualDuration: 0.45,
                 bounce: 0.3
             }
-        )
+        ).finished.finally(() => {
+            panel.style.willChange = ""
+        })
     }
 
     function hidePanel(index) {
@@ -74,20 +73,23 @@ export function init() {
 
         panel.setAttribute("aria-hidden", "true")
         panel.style.pointerEvents = "none"
+        panel.style.willChange = "transform, opacity, filter"
 
         animate(
             panel,
             {
-                opacity: 0,
-                transform: "translateY(-12px)",
-                filter: "blur(18px)"
+                opacity: [panel.style.opacity || 1, 0],
+                transform: [panel.style.transform || "translateY(0px)", "translateY(-12px)"],
+                filter: [panel.style.filter || "blur(0px)", "blur(18px)"]
             },
             {
                 type: "spring",
                 visualDuration: 0.35,
                 bounce: 0.18
             }
-        )
+        ).finished.finally(() => {
+            panel.style.willChange = ""
+        })
     }
 
     function setActive(nextIndex) {

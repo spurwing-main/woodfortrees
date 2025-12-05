@@ -1,3 +1,4 @@
+// breakpoints: mobilePortrait < mobileLandscape < tablet < desktop
 export const breakpoints = [
     { name: 'mobilePortrait', max: 478 },
     { name: 'mobileLandscape', max: 767 },

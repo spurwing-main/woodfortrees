@@ -1,7 +1,6 @@
 import { maxWidthQuery } from '../utils/breakpoints.js'
 
-let baseCleanups = []
-let pointerCleanups = []
+let cleanupFns = []
 let emblaApi = null
 
 export function init() {
@@ -42,16 +41,10 @@ export function init() {
         scope.addEventListener('pointercancel', onPointerUpOrCancel, { passive: true })
         scope.addEventListener('mouseleave', onPointerUpOrCancel, { passive: true })
 
-        pointerCleanups.push(() => scope.removeEventListener('pointerdown', onPointerDown))
-        pointerCleanups.push(() => window.removeEventListener('pointerup', onPointerUpOrCancel))
-        pointerCleanups.push(() => scope.removeEventListener('pointercancel', onPointerUpOrCancel))
-        pointerCleanups.push(() => scope.removeEventListener('mouseleave', onPointerUpOrCancel))
-    }
-
-    const enable = () => {
-        if (emblaApi) return
-        emblaApi = EmblaCarousel(scope, options)
-        attachPointerHandlers()
+        cleanupFns.push(() => scope.removeEventListener('pointerdown', onPointerDown))
+        cleanupFns.push(() => window.removeEventListener('pointerup', onPointerUpOrCancel))
+        cleanupFns.push(() => scope.removeEventListener('pointercancel', onPointerUpOrCancel))
+        cleanupFns.push(() => scope.removeEventListener('mouseleave', onPointerUpOrCancel))
     }
 
     const disable = () => {
@@ -60,14 +53,16 @@ export function init() {
             emblaApi = null
         }
         setGrabbing(false)
-        pointerCleanups.splice(0).forEach((fn) => {
-            try {
-                fn()
-            } catch (err) {
-                console.warn('howSlider cleanup', err)
-            }
-        })
-        pointerCleanups = []
+        scope.removeEventListener('pointerdown', onPointerDown)
+        window.removeEventListener('pointerup', onPointerUpOrCancel)
+        scope.removeEventListener('pointercancel', onPointerUpOrCancel)
+        scope.removeEventListener('mouseleave', onPointerUpOrCancel)
+    }
+
+    const enable = () => {
+        if (emblaApi) return
+        emblaApi = EmblaCarousel(scope, options)
+        attachPointerHandlers()
     }
 
     const sync = () => {
@@ -79,8 +74,8 @@ export function init() {
     }
 
     mql.addEventListener('change', sync)
-    baseCleanups.push(() => mql.removeEventListener('change', sync))
-    baseCleanups.push(() => disable())
+    cleanupFns.push(() => mql.removeEventListener('change', sync))
+    cleanupFns.push(() => disable())
 
     sync()
 }
@@ -90,20 +85,12 @@ export function destroy() {
         emblaApi.destroy?.()
         emblaApi = null
     }
-    pointerCleanups.splice(0).forEach((fn) => {
+    cleanupFns.splice(0).forEach((fn) => {
         try {
             fn()
         } catch (err) {
             console.warn('howSlider destroy', err)
         }
     })
-    pointerCleanups = []
-    baseCleanups.splice(0).forEach((fn) => {
-        try {
-            fn()
-        } catch (err) {
-            console.warn('howSlider destroy', err)
-        }
-    })
-    baseCleanups = []
+    cleanupFns = []
 }

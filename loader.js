@@ -43,6 +43,7 @@ const featureList = [
     { name: 'expertTabs', load: () => import('./features/expertTabs.js') },
     { name: 'testimonialSlider', load: () => import('./features/testimonialSlider.js') },
     { name: 'howSlider', load: () => import('./features/howSlider.js') },
+    { name: 'contactForm', load: () => import('./features/contactForm.js') },
 ]
 
 // list of utils to load
@@ -60,6 +61,22 @@ async function boot() {
 
     await waitForDomReady()
 
+    for (const util of utilList) {
+        try {
+            const mod = await util.load()
+            kit.utils[util.name] = mod
+
+            if (typeof mod.init === 'function') {
+                const maybeStop = mod.init()
+                if (typeof maybeStop === 'function') {
+                    mod.stop = maybeStop
+                }
+            }
+        } catch (error) {
+            console.warn('sitekit util failed', util.name, error?.message || error)
+        }
+    }
+
     for (const feature of featureList) {
         try {
             const mod = await feature.load()
@@ -72,21 +89,7 @@ async function boot() {
                 mod.init()
             }
         } catch (error) {
-            console.warn('sitekit: feature failed', feature.name, error)
-        }
-    }
-
-    // utils load after features; they may emit events globally
-    for (const util of utilList) {
-        try {
-            const mod = await util.load()
-            kit.utils[util.name] = mod
-
-            if (typeof mod.init === 'function') {
-                mod.init()
-            }
-        } catch (error) {
-            console.warn('sitekit: util failed', util.name, error)
+            console.warn('sitekit feature failed', feature.name, error?.message || error)
         }
     }
 }

@@ -74,12 +74,12 @@ function animateImage(element, keyframes, options) {
     const controls = animate(element, keyframes, options);
     activeAnimations.set(element, controls);
 
-    return Promise.resolve(controls)
+    return controls.finished
         .catch(() => { })
         .then(() => {
             if (activeAnimations.get(element) === controls) {
                 activeAnimations.delete(element);
-                element.style.willChange = "auto";
+                element.style.willChange = "";
             }
         });
 }
