@@ -44,6 +44,7 @@ const featureList = [
     { name: 'testimonialSlider', load: () => import('./features/testimonialSlider.js') },
     { name: 'howSlider', load: () => import('./features/howSlider.js') },
     { name: 'contactForm', load: () => import('./features/contactForm.js') },
+    { name: 'homeHoz', load: () => import('./features/homeHoz.js') },
 ]
 
 // list of utils to load
