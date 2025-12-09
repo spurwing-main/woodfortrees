@@ -15,80 +15,103 @@ export function init() {
     const items = Array.from(list.children);
     if (!items.length) return;
 
-    const section = layout.closest(".section_slider") || layout;
-
-    // Target driven directly by scroll
     const targetX = motionValue(0);
 
-    // Very light smoothing: just enough to hide wheel tearing
+    // Light smoothing: hides wheel steps but stays snappy
     const smoothX = springValue(targetX, {
-        stiffness: 240, // quick to respond
-        damping: 24,    // enough to avoid jitter/overshoot
-        mass: 0.5       // light, so it doesn’t feel heavy/laggy
+        stiffness: 600,
+        damping: 50,
+        mass: 0.25
     });
 
+    // Hint GPU transform
+    list.style.willChange = "transform";
     styleEffect(list, { x: smoothX });
 
     let totalDistance = 0;
-    let stopAt = 1; // scroll progress where horizontal motion finishes
+    let scrollStart = 0;
+    let scrollEnd = 0;
 
     function computeDistances() {
         const listStyles = getComputedStyle(list);
         const layoutStyles = getComputedStyle(layout);
-        const firstItem = items[0];
-        const itemRect = firstItem.getBoundingClientRect();
 
-        const itemWidth = itemRect.width;
-        const itemHeight = itemRect.height;
-        const gap = parseFloat(listStyles.columnGap || listStyles.gap || "0");
+        const firstItem = items[0];
+        const rect = firstItem.getBoundingClientRect();
+
+        const itemWidth = rect.width;
+        const itemHeight = rect.height;
+        if (!itemWidth || !itemHeight) return;
+
+        const gap =
+            parseFloat(listStyles.columnGap || listStyles.gap || "0") || 0;
         const count = items.length;
         const viewportWidth = window.innerWidth;
 
-        // Read how many columns/cards the layout shows
+        // How many cards are visible (from CSS var)
         const colsRaw = layoutStyles.getPropertyValue("--slider--cols");
         const cols = parseFloat(colsRaw) || 0;
 
-        // Your requested formula, with a safety clamp
-        let extraCards = cols;
-        
-        console.log('extraCards:', extraCards);
+        // Scroll past the visible set by this many extra cards
+        const extraCards = cols > 0 ? cols : 0;
 
         const fullWidth = (itemWidth + gap) * (count + extraCards) - gap;
         totalDistance = Math.max(0, fullWidth - viewportWidth);
 
-        // Scroll distance driving the animation
+        // Layout scroll span: pinned duration = totalDistance
         const layoutHeight = totalDistance + window.innerHeight;
         layout.style.height = `${layoutHeight}px`;
 
-        // Section height used by scroll progress 0–1
-        const sectionRect = section.getBoundingClientRect();
-        const sectionHeight = sectionRect.height || layoutHeight;
+        const scrollY =
+            window.scrollY || window.pageYOffset || 0;
 
-        // End horizontal motion one card-height before the end
-        const padFraction = itemHeight / sectionHeight;
-        stopAt = 1 - padFraction;
+        const layoutRect = layout.getBoundingClientRect();
+        const listRect = list.getBoundingClientRect();
 
-        if (!isFinite(stopAt) || stopAt <= 0.1) {
-            stopAt = 1;
+        // Convert sticky top (33vh etc) to px
+        const rawTop = listStyles.top || "0";
+        let stickyTopPx = 0;
+
+        if (rawTop.endsWith("vh")) {
+            const vh = parseFloat(rawTop) || 0;
+            stickyTopPx = (vh / 100) * window.innerHeight;
+        } else {
+            stickyTopPx = parseFloat(rawTop) || 0;
         }
+
+        // Absolute Y of layout top
+        const layoutTopY = scrollY + layoutRect.top;
+
+        // Offset of list inside layout (in px)
+        const listOffsetInLayout = listRect.top - layoutRect.top;
+
+        // When scrollY === scrollStart, list's top === stickyTopPx
+        scrollStart = layoutTopY + listOffsetInLayout - stickyTopPx;
+        if (!isFinite(scrollStart)) scrollStart = layoutTopY;
+
+        // Vertical scroll span is exactly totalDistance
+        scrollEnd = scrollStart + totalDistance;
     }
 
     computeDistances();
-    resize(() => {
-        computeDistances();
-    });
+    resize(computeDistances);
 
-    scroll((progress) => {
-        // progress: 0 → 1 over ["start center", "end center"]
-        // Only animate over 0..stopAt, then freeze.
-        let clamped = progress;
-        if (clamped > stopAt) clamped = stopAt;
+    scroll((_, info) => {
+        const y = info.y.current;
 
-        const activeProgress = clamped / stopAt;
-        targetX.set(-activeProgress * totalDistance);
+        const span = scrollEnd - scrollStart;
+        let progress = 0;
+
+        if (span > 0) {
+            progress = (y - scrollStart) / span;
+            // clamp 0–1
+            if (progress < 0) progress = 0;
+            else if (progress > 1) progress = 1;
+        }
+
+        // 0 -> no movement, 1 -> fullDistance
+        targetX.set(-progress * totalDistance);
     }, {
-        target: section,
-        axis: "y",
-        offset: ["start center", "end center"]
+        axis: "y"
     });
 }
