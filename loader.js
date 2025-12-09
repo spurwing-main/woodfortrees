@@ -45,6 +45,7 @@ const featureList = [
     { name: 'howSlider', load: () => import('./features/howSlider.js') },
     { name: 'contactForm', load: () => import('./features/contactForm.js') },
     { name: 'homeHoz', load: () => import('./features/homeHoz.js') },
+    { name: 'navLogoTheme', load: () => import('./features/navLogoTheme.js') },
 ]
 
 // list of utils to load
@@ -65,14 +66,16 @@ async function boot() {
     for (const util of utilList) {
         try {
             const mod = await util.load()
-            kit.utils[util.name] = mod
+            const utilExports = { ...mod }
 
             if (typeof mod.init === 'function') {
                 const maybeStop = mod.init()
                 if (typeof maybeStop === 'function') {
-                    mod.stop = maybeStop
+                    utilExports.stop = maybeStop
                 }
             }
+
+            kit.utils[util.name] = utilExports
         } catch (error) {
             console.warn('sitekit util failed', util.name, error?.message || error)
         }
