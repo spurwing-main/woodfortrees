@@ -18,8 +18,8 @@ export function init() {
     const WHITE_TRIGGER_HEX = [
         "#191919", // dark grey
         "#000000", // black
-        "#0094d6", // blue
-        "#ff9ebd"  // rgb(255, 158, 189)
+        // "#0094d6", // blue
+        // "#ff9ebd"
     ];
 
     function hexToRGB(hex) {
