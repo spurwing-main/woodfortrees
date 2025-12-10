@@ -1,28 +1,22 @@
 function getKit() {
     const w = window
-
     if (!w.sitekit) {
         w.sitekit = {}
     }
-
     if (!w.sitekit.features) {
         w.sitekit.features = {}
     }
-
     if (!w.sitekit.utils) {
         w.sitekit.utils = {}
     }
-
     return w.sitekit
 }
 
 function waitForDomReady() {
     const state = document.readyState
-
     if (state === 'interactive' || state === 'complete') {
         return Promise.resolve()
     }
-
     return new Promise((resolve) => {
         document.addEventListener(
             'DOMContentLoaded',
@@ -46,6 +40,8 @@ const featureList = [
     { name: 'contactForm', load: () => import('./features/contactForm.js') },
     { name: 'homeHoz', load: () => import('./features/homeHoz.js') },
     { name: 'navLogoTheme', load: () => import('./features/navLogoTheme.js') },
+    { name: 'pastaLlax', load: () => import('./features/pastaLlax.js') },
+    // e.g. { name: 'navColorTheme', load: () => import('./features/navColorTheme.js') },
 ]
 
 // list of utils to load
@@ -63,6 +59,7 @@ async function boot() {
 
     await waitForDomReady()
 
+    // Utils
     for (const util of utilList) {
         try {
             const mod = await util.load()
@@ -76,11 +73,17 @@ async function boot() {
             }
 
             kit.utils[util.name] = utilExports
+
+            // mount util api if present: sitekit[util.name]
+            if (mod.api && typeof mod.api === 'object') {
+                kit[util.name] = mod.api
+            }
         } catch (error) {
             console.warn('sitekit util failed', util.name, error?.message || error)
         }
     }
 
+    // Features
     for (const feature of featureList) {
         try {
             const mod = await feature.load()
@@ -91,6 +94,11 @@ async function boot() {
             // auto-init if available
             if (typeof mod.init === 'function') {
                 mod.init()
+            }
+
+            // if module exposes an api object, mount to sitekit[feature.name]
+            if (mod.api && typeof mod.api === 'object') {
+                kit[feature.name] = mod.api
             }
         } catch (error) {
             console.warn('sitekit feature failed', feature.name, error?.message || error)
