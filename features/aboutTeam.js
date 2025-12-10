@@ -7,7 +7,7 @@ import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm"
 const springIn = {
     type: "spring",
     visualDuration: 0.4,
-    bounce: 0.3,
+    bounce: 0.2,
 };
 
 const springOut = {
