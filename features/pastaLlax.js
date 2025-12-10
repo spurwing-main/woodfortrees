@@ -7,20 +7,13 @@ import {
 } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
 
 export function init() {
-    console.log("pastaLlax init");
-
     const sections = document.querySelectorAll(".hero_pastallax");
     if (!sections.length) return;
 
-    // ===== EXACT VARIANT 1 @ 25% STRENGTH =====
-    // Back:  -25px → 100px   (delta +125px)
-    // Front:  0px  → 50px    (delta +50px)
-    // Mid:   stays on its CSS transform
+    // Extra translateY over full scroll range
     const BACK_DELTA_PX = 125;
     const FRONT_DELTA_PX = 50;
 
-    // Same spring feel as React:
-    // useSpring(scrollYProgress, { stiffness: 100, damping: 30, restDelta: 0.001 })
     const SPRING_CONFIG = {
         stiffness: 100,
         damping: 30,
@@ -38,7 +31,6 @@ export function init() {
         const mid = images[1];
         const front = images[2];
 
-        // Read CSS starting transforms once
         const backComputed = getComputedStyle(back).transform;
         const frontComputed = getComputedStyle(front).transform;
 
@@ -50,43 +42,60 @@ export function init() {
         back.style.willChange = "transform";
         front.style.willChange = "transform";
 
-        // Raw scroll progress 0–1
+        // Our "relative progress" value
         const progress = motionValue(0);
-
-        // Smoothed / inertial progress (same feel as useSpring)
         const smoothProgress = springValue(progress, SPRING_CONFIG);
 
-        // Back layer: add 0 → +125px on top of CSS transform
         const backTransform = transformValue(() => {
-            const p = smoothProgress.get(); // 0–1
+            const p = smoothProgress.get();
             const extra = BACK_DELTA_PX * p;
 
-            if (backBase) {
-                return `${backBase} translate3d(0, ${extra}px, 0)`;
-            }
-            return `translate3d(0, ${extra}px, 0)`;
+            return backBase
+                ? `${backBase} translate3d(0, ${extra}px, 0)`
+                : `translate3d(0, ${extra}px, 0)`;
         });
 
-        // Front layer: add 0 → +50px on top of CSS transform
         const frontTransform = transformValue(() => {
-            const p = smoothProgress.get(); // 0–1
+            const p = smoothProgress.get();
             const extra = FRONT_DELTA_PX * p;
 
-            if (frontBase) {
-                return `${frontBase} translate3d(0, ${extra}px, 0)`;
-            }
-            return `translate3d(0, ${extra}px, 0)`;
+            return frontBase
+                ? `${frontBase} translate3d(0, ${extra}px, 0)`
+                : `translate3d(0, ${extra}px, 0)`;
         });
 
-        // Bind transforms
         styleEffect(back, { transform: backTransform });
         styleEffect(front, { transform: frontTransform });
-        // mid is left alone — pure CSS
 
-        // Link scroll → progress
+        // === Scroll → progress mapping with "no move before scroll" ===
+
+        const startScrollY = window.scrollY;
+        let hasUserScrolled = false;
+        let initialProgress = 0;
+
         scroll(
             (p) => {
-                progress.set(p);
+                const currentScrollY = window.scrollY;
+                const deltaY = currentScrollY - startScrollY;
+
+                // Ignore Motion's layout noise until actual scroll
+                if (!hasUserScrolled) {
+                    if (Math.abs(deltaY) < 1) {
+                        // Hard lock to CSS position
+                        if (progress.get() !== 0) progress.set(0);
+                        return;
+                    }
+
+                    hasUserScrolled = true;
+                    initialProgress = p;
+                }
+
+                let relative = p - initialProgress;
+
+                if (relative < 0) relative = 0;
+                if (relative > 1) relative = 1;
+
+                progress.set(relative);
             },
             {
                 target: section,
