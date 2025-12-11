@@ -16,7 +16,7 @@ const springOut = {
     bounce: 0.15,
 };
 
-const hoverIntentDelayMs = 200;
+const hoverIntentDelayMs = 20;
 const stackEnterY = -24;
 const stackEnterScale = 1.05;
 const stackExitY = 12;
@@ -27,6 +27,10 @@ const stackExitScale = 0.97;
 -------------------------------- */
 
 const activeAnimations = new WeakMap();
+
+function isAnimating(element) {
+    return activeAnimations.has(element);
+}
 
 function stopAnimation(element) {
     const controls = activeAnimations.get(element);
@@ -47,6 +51,7 @@ function animateElement(element, keyframes, options) {
     return controls.finished
         .catch(() => { })
         .then(() => {
+            // Only clean up if this is still the active animation
             if (activeAnimations.get(element) === controls) {
                 activeAnimations.delete(element);
                 element.style.willChange = "";
@@ -76,13 +81,19 @@ function composeTransform(el, dy, scale) {
 -------------------------------- */
 
 function showLayer(element, delayMs = 0) {
+    // If it's already fully visible and not animating, skip.
+    const isVisible = element.style.visibility === "visible";
+    const opacity = element.style.opacity;
+
     if (
-        element.style.visibility === "visible" &&
-        (element.style.opacity === "" || element.style.opacity === "1")
+        isVisible &&
+        (opacity === "" || opacity === "1") &&
+        !isAnimating(element)
     ) {
         return Promise.resolve();
     }
 
+    // Ensure it's marked visible so the animation has somewhere to go
     element.style.visibility = "visible";
 
     return animateElement(
@@ -102,6 +113,7 @@ function showLayer(element, delayMs = 0) {
 }
 
 function hideLayer(element, delayMs = 0) {
+    // If it's already hidden, don't bother.
     if (element.style.visibility === "hidden") {
         return Promise.resolve();
     }
@@ -120,12 +132,14 @@ function hideLayer(element, delayMs = 0) {
             delay: delayMs / 1000,
         }
     ).then(() => {
+        // After hide finishes, hard reset to "stacked, ready to enter" pose
         element.style.visibility = "hidden";
         element.style.transform = composeTransform(
             element,
             stackEnterY,
             stackEnterScale
         );
+        element.style.opacity = "0";
     });
 }
 
@@ -150,13 +164,14 @@ function createStateController(img1, img2, img3, bio, countItems = []) {
     function updateCount(nextState) {
         if (!countItems || !countItems.length) return;
 
-        countItems.forEach((dot, index) => {
-            if (index <= nextState) {
+        for (let i = 0; i < countItems.length; i++) {
+            const dot = countItems[i];
+            if (i <= nextState) {
                 dot.classList.add("is-active");
             } else {
                 dot.classList.remove("is-active");
             }
-        });
+        }
     }
 
     function applyInitialLayout() {
@@ -165,11 +180,13 @@ function createStateController(img1, img2, img3, bio, countItems = []) {
         img1.style.visibility = "visible";
         img1.style.transform = composeTransform(img1, 0, 1);
 
-        [img2, img3, bio].forEach((el) => {
+        const others = [img2, img3, bio];
+        for (let i = 0; i < others.length; i++) {
+            const el = others[i];
             el.style.opacity = "0";
             el.style.visibility = "hidden";
             el.style.transform = composeTransform(el, stackEnterY, stackEnterScale);
-        });
+        }
 
         // state 0 on load → first dot active
         updateCount(0);
@@ -381,7 +398,9 @@ function setupStack(media, img1, img2, img3, bio) {
     }
     media.style.overflow = "visible";
 
-    [img1, img2, img3].forEach((image, index) => {
+    const imgs = [img1, img2, img3];
+    for (let i = 0; i < imgs.length; i++) {
+        const image = imgs[i];
         captureBaseTransform(image);
         Object.assign(image.style, {
             position: "absolute",
@@ -390,15 +409,19 @@ function setupStack(media, img1, img2, img3, bio) {
             height: "100%",
             objectFit: "cover",
             transformOrigin: "center center",
-            zIndex: String(1 + index),
+            zIndex: String(1 + i),
         });
-    });
+    }
 
     captureBaseTransform(bio);
-    bio.style.position = bio.style.position || "absolute";
+    if (!bio.style.position) {
+        bio.style.position = "absolute";
+    }
+    if (!bio.style.bottom) {
+        bio.style.bottom = "0";
+    }
     bio.style.left = "0";
     bio.style.right = "0";
-    bio.style.bottom = bio.style.bottom || "0";
 }
 
 /* -------------------------------
@@ -427,38 +450,52 @@ export function init() {
 
     const lists = Array.from(root.querySelectorAll(".team_list"));
 
-    lists.forEach((list) => {
+    for (let i = 0; i < lists.length; i++) {
+        const list = lists[i];
         const children = Array.from(list.children);
-        const ctas = children.filter((el) => el.classList.contains("team_cta"));
-        const others = children.filter((el) => !el.classList.contains("team_cta"));
+        const ctas = [];
+        const others = [];
+
+        for (let j = 0; j < children.length; j++) {
+            const el = children[j];
+            if (el.classList.contains("team_cta")) {
+                ctas.push(el);
+            } else {
+                others.push(el);
+            }
+        }
 
         shuffleInPlace(others);
 
-        // Re-append shuffled others first, CTA(s) last
-        others.forEach((el) => list.appendChild(el));
-        ctas.forEach((el) => list.appendChild(el));
-    });
+        for (let j = 0; j < others.length; j++) {
+            list.appendChild(others[j]);
+        }
+        for (let j = 0; j < ctas.length; j++) {
+            list.appendChild(ctas[j]);
+        }
+    }
 
     /* ---- 2. Wire Motion for all non-CTA team cards ---- */
 
     const items = Array.from(
-        root.querySelectorAll(".team_item") // CTA is .team_cta, so excluded
+        root.querySelectorAll(".team_item")
     );
     if (!items.length) return;
 
     const coarseQuery = window.matchMedia("(hover: none), (pointer: coarse)");
     const isCoarsePointer = coarseQuery.matches;
 
-    items.forEach((item) => {
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         const media = item.querySelector(".team_item-media");
-        if (!media) return;
+        if (!media) continue;
 
         const img1 = media.querySelector(".team_item-media-img.is-1");
         const img2 = media.querySelector(".team_item-media-img.is-2");
         const img3 = media.querySelector(".team_item-media-img.is-3");
         const bio = media.querySelector(".team_item-bio");
 
-        if (!img1 || !img2 || !img3 || !bio) return;
+        if (!img1 || !img2 || !img3 || !bio) continue;
 
         setupStack(media, img1, img2, img3, bio);
 
@@ -474,5 +511,5 @@ export function init() {
                 isCoarsePointer,
             }
         );
-    });
+    }
 }
