@@ -32,8 +32,8 @@ const CONFIG = {
     // Offsets between OUT and IN (in seconds)
     // These are *relative*, but both animations are scheduled together.
     offsets: {
-        singleIn: 0.08,   // new card starts 0.08s after old card starts fading/scaling out
-        globalIn: 0.1     // cluster IN starts 0.1s after OUT starts
+        singleIn: 0.08, // new card starts 0.08s after old card starts fading/scaling out
+        globalIn: 0.1   // cluster IN starts 0.1s after OUT starts
     },
 
     staggerStep: 0.06,
@@ -48,12 +48,16 @@ const imageCache =
         window.aboutHeroImageCache || new Map());
 
 let pools = { people: [], places: [] }; // string[]
+// `theme` = currently *selected* theme (including in-flight transitions)
 let theme = "people";
 let slots = []; // [{ block, item, img, src }]
 
 let autoTimer = null;
-let isBusy = false; // any swap / theme transition in-flight
-let queuedTheme = null; // at most one queued theme
+let isBusy = false;      // any swap / theme transition in-flight
+let queuedTheme = null;  // at most one queued theme, last click wins
+
+// remember the last couple of auto-swapped slots
+let lastAutoSlotHistory = []; // [mostRecent, previous]
 
 // cached DOM for queued theme changes
 let sectionEl = null;
@@ -304,11 +308,49 @@ async function runAutoSwap() {
         return;
     }
 
-    const slotIndex = (Math.random() * slots.length) | 0;
+    const totalSlots = slots.length;
+
+    // pick a slot index that hasn't been used in the last 2 auto swaps, if possible
+    let slotIndex = 0;
+
+    if (totalSlots === 1) {
+        slotIndex = 0;
+    } else {
+        const candidates = [];
+        for (let i = 0; i < totalSlots; i++) {
+            let isForbidden = false;
+            for (let j = 0; j < lastAutoSlotHistory.length; j++) {
+                if (lastAutoSlotHistory[j] === i) {
+                    isForbidden = true;
+                    break;
+                }
+            }
+            if (!isForbidden) {
+                candidates.push(i);
+            }
+        }
+
+        // if we couldn't avoid the last two (e.g. only 2 slots), fall back to all
+        if (!candidates.length) {
+            for (let i = 0; i < totalSlots; i++) {
+                candidates.push(i);
+            }
+        }
+
+        const chosenIdx = (Math.random() * candidates.length) | 0;
+        slotIndex = candidates[chosenIdx];
+    }
+
     const slot = slots[slotIndex];
     if (!slot) {
         scheduleAuto();
         return;
+    }
+
+    // update history: most recent at index 0
+    lastAutoSlotHistory.unshift(slotIndex);
+    if (lastAutoSlotHistory.length > 2) {
+        lastAutoSlotHistory.length = 2;
     }
 
     const used = new Set(slots.map((s) => s.src));
@@ -382,17 +424,19 @@ async function changeTheme(key) {
         warn("changeTheme: empty pool", key);
         return;
     }
-    if (key === theme) return;
     if (!sectionEl || !titleEl) return;
 
-    // if we're in the middle of any animation, queue this theme and bail
+    // If an animation is in-flight, just remember the latest requested theme.
     if (isBusy) {
-        if (key !== queuedTheme && key !== theme) {
+        if (queuedTheme !== key) {
             queuedTheme = key;
             log("changeTheme queued:", key);
         }
         return;
     }
+
+    // We're idle here. If we're already on this theme, nothing to do.
+    if (key === theme) return;
 
     if (autoTimer) {
         clearTimeout(autoTimer);
@@ -400,7 +444,11 @@ async function changeTheme(key) {
     }
 
     isBusy = true;
-    queuedTheme = null; // we're about to satisfy the most recent request
+    queuedTheme = null;
+
+    // Mark this as the selected theme immediately.
+    // UI state + future click logic now track this as "current".
+    theme = key;
 
     const count = slots.length;
     const newSrcs = pickSrcs(pool, count);
@@ -450,7 +498,6 @@ async function changeTheme(key) {
         await Promise.all([outPromise, inPromise]);
 
         oldItems.forEach((el) => el.remove());
-        theme = key;
     } catch (err) {
         warn("changeTheme error", err);
     } finally {
@@ -496,6 +543,7 @@ export function init() {
     slots = [];
     isBusy = false;
     queuedTheme = null;
+    lastAutoSlotHistory = [];
 
     pools = buildPools();
     if (!pools.people.length && !pools.places.length) {
@@ -553,18 +601,29 @@ export function init() {
         .catch((err) => warn("init error", err))
         .finally(() => {
             isBusy = false;
-            scheduleAuto();
+
+            // If user clicked a theme during the initial animation, respect it.
+            if (queuedTheme && queuedTheme !== theme) {
+                const nextKey = queuedTheme;
+                queuedTheme = null;
+                changeTheme(nextKey);
+            } else {
+                scheduleAuto();
+            }
         });
 
-    // theme buttons: respect queueing logic
+    // theme buttons: always go through queueing logic
     buttons.forEach((btn) => {
         btn.addEventListener("click", () => {
             const key = (btn.dataset.aboutHero || "")
                 .toLowerCase()
                 .trim();
             if (!key) return;
-            if (key === theme || key === queuedTheme) return;
 
+            // Ignore if this theme is already selected
+            if (key === theme) return;
+
+            // changeTheme handles isBusy/queueing itself
             changeTheme(key);
         });
     });
