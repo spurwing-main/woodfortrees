@@ -61,7 +61,7 @@ const CONFIG = {
         // Cards: quick and staggered
         cardDuration: 0.28,
         cardStaggerStep: 0.055,
-        cardScaleTo: 0.9,
+        cardScaleTo: 0.7,
 
         // Calm, high-quality ease-out
         easeOut: [0.22, 1, 0.36, 1],
