@@ -8,9 +8,19 @@ const log = (...a) => DEBUG && console.log("[homeLoading]", ...a);
 const warn = (...a) => console.warn("[homeLoading]", ...a);
 
 const CONFIG = {
+    gate: {
+        // show at most once per 24h
+        seenCookie: "wft_home_loading_seen",
+        cooldownSeconds: 60 * 60 * 24,
+
+        // set to `1` to show every time (dev)
+        devAlwaysCookie: "wft_home_loading_dev"
+    },
+
     stack: {
         count: 6,
         offsetPx: 8,
+        jitterPx: 1.5,
         rotateMin: -9,
         rotateMax: 9,
 
@@ -65,6 +75,41 @@ let created = [];
 let retryTimer = null;
 let runToken = 0;
 let attempts = 0;
+
+function getCookie(name) {
+    if (!name) return null;
+    const parts = String(document.cookie || "")
+        .split(";")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const prefix = name + "=";
+    const hit = parts.find((p) => p.startsWith(prefix));
+    if (!hit) return null;
+
+    try {
+        return decodeURIComponent(hit.slice(prefix.length));
+    } catch {
+        return hit.slice(prefix.length);
+    }
+}
+
+function setCookie(name, value, maxAgeSeconds) {
+    if (!name) return;
+    const encoded = encodeURIComponent(String(value ?? ""));
+    const maxAge = Number.isFinite(maxAgeSeconds) ? Math.max(0, maxAgeSeconds) : undefined;
+    document.cookie = `${name}=${encoded}; Path=/; SameSite=Lax${maxAge !== undefined ? `; Max-Age=${maxAge}` : ""}`;
+}
+
+function isDevAlways() {
+    return getCookie(CONFIG.gate.devAlwaysCookie) === "1";
+}
+
+function hasSeenRecently() {
+    return Boolean(getCookie(CONFIG.gate.seenCookie));
+}
+
+const lerp = (a, b, t) => a + (b - a) * t;
 
 function dedupe(arr) {
     return Array.from(new Set((arr || []).filter(Boolean)));
@@ -251,6 +296,11 @@ async function ensureStack(section, layout, token) {
     }
     if (!loadedSrcs.length) return;
 
+    // Mark as seen only when we’re actually going to show.
+    if (!isDevAlways()) {
+        setCookie(CONFIG.gate.seenCookie, "1", CONFIG.gate.cooldownSeconds);
+    }
+
     // Replace the single placeholder image, if it exists.
     const placeholder = layout.querySelector("img.loading_image");
     const baseClass = placeholder?.className || "loading_image";
@@ -299,14 +349,23 @@ async function ensureStack(section, layout, token) {
     });
 
     const count = items.length;
+    const startDx = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
+    const startDy = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
     const cards = items.map((el, i) => {
         const isLast = i === count - 1;
         const rot = CONFIG.stack.lastCardStraight && isLast
             ? 0
             : rand(CONFIG.stack.rotateMin, CONFIG.stack.rotateMax);
 
-        const dx = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
-        const dy = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
+        // Drift each card slightly toward the center; final card ends centered.
+        const t = count <= 1 ? 1 : i / (count - 1);
+        const jitter = CONFIG.stack.jitterPx;
+        const dx = CONFIG.stack.lastCardStraight && isLast
+            ? 0
+            : lerp(startDx, 0, t) + rand(-jitter, jitter);
+        const dy = CONFIG.stack.lastCardStraight && isLast
+            ? 0
+            : lerp(startDy, 0, t) + rand(-jitter, jitter);
         const startRot = rot + rand(-CONFIG.intro.dropRotDelta, CONFIG.intro.dropRotDelta);
 
         const endScale = 1 + i * CONFIG.intro.scaleStep;
@@ -364,6 +423,12 @@ export function init() {
 
     const section = document.querySelector(".section_loading");
     if (!section) return;
+
+    // Gate: show at most once per 24h unless dev override cookie is set.
+    if (!isDevAlways() && hasSeenRecently()) {
+        section.style.display = "none";
+        return;
+    }
 
     const layout = section.querySelector(".loading_layout") || document.querySelector(".loading_layout");
     if (!layout) return;
