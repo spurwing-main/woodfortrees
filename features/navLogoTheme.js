@@ -11,7 +11,7 @@
 // The script looks at where the nav overlaps the page and picks the
 // theme from the section under it.
 
-import { scroll, animate } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+import { scroll, animate } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
 let sections = [];
 

@@ -4,7 +4,7 @@ import {
     springValue,
     styleEffect,
     transformValue,
-} from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+} from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
 export function init() {
     const sections = document.querySelectorAll(".hero_pastallax");

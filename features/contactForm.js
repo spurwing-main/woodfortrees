@@ -44,8 +44,8 @@ function handleSuccessPage() {
     const el = document.querySelector('.section_success .title-m')
     if (!el) return
 
-    el.textContent =
-        el.textContent.trim().replace(/\.*$/, '') + ', ' + name + '.'
+    const base = el.textContent.trim().replace(/\.*$/, '')
+    el.innerHTML = `${base}, <i>${name}</i>.`
 }
 
 export function init() {

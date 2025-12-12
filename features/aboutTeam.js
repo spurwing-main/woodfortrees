@@ -1,4 +1,4 @@
-import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
 /* -------------------------------
    motion config

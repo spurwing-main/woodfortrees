@@ -1,7 +1,7 @@
 // aboutHero.js
 // Expects: window.aboutHeroImages = [{ src, people?: boolean, place?: boolean }, ...]
 
-import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm";
+import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
 const DEBUG = false;
 const log = (...a) => DEBUG && console.log("[aboutHero]", ...a);
@@ -43,9 +43,7 @@ const CONFIG = {
 
 // ===== shared state =====
 
-const imageCache =
-    (window.aboutHeroImageCache =
-        window.aboutHeroImageCache || new Map());
+let imageCache; // Map<string, Promise<void>>
 
 let pools = { people: [], places: [] }; // string[]
 // `theme` = currently *selected* theme (including in-flight transitions)
@@ -529,6 +527,12 @@ export function init() {
     if (!section || !layout || !title || !blocks.length) {
         warn("init: missing DOM");
         return;
+    }
+
+    if (!imageCache) {
+        window.aboutHeroImageCache =
+            window.aboutHeroImageCache || new Map();
+        imageCache = window.aboutHeroImageCache;
     }
 
     sectionEl = section;

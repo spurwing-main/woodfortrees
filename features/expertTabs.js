@@ -1,4 +1,4 @@
-import { animate } from "https://cdn.jsdelivr.net/npm/motion@latest/+esm"
+import { animate } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm"
 
 let cleanupFns = []
 
