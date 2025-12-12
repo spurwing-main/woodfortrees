@@ -8,42 +8,55 @@ const log = (...a) => DEBUG && console.log("[homeLoading]", ...a);
 const warn = (...a) => console.warn("[homeLoading]", ...a);
 
 const CONFIG = {
-    stackCount: 6,
-    maxAttempts: 6,
-    retryDelayMs: 250,
+    stack: {
+        count: 6,
+        offsetPx: 8,
+        rotateMin: -9,
+        rotateMax: 9,
 
-    holdBeforeOutroMs: 900,
-
-    // visual feel
-    rotateMin: -9,
-    rotateMax: 9,
-    offsetPx: 8,
-
-    // aboutHero-ish drop pose (slower)
-    dropInY: -22,
-    dropInScale: 1.08,
-    dropRotDelta: 4.5,
-    staggerStep: 0.28,
-    inScaleStep: 0.018,
-    springs: {
-        in: { type: "spring", stiffness: 420, damping: 46, mass: 1 }
+        // request: last one straight
+        lastCardStraight: true
     },
-    durations: {
-        in: 1.65
+
+    retry: {
+        maxAttempts: 6,
+        delayMs: 250
+    },
+
+    timing: {
+        // delay before anything starts (incl. preload requests)
+        startDelayMs: 250,
+
+        // pause after intro settles
+        holdBeforeOutroMs: 900
+    },
+
+    intro: {
+        // aboutHero-ish drop pose (slower)
+        dropInY: -22,
+        dropInScale: 1.08,
+        dropRotDelta: 4.5,
+
+        // each card ends slightly larger
+        scaleStep: -0.018,
+
+        staggerStep: 0.38,
+        duration: 1.65,
+        spring: { type: "spring", stiffness: 420, damping: 46, mass: 1 }
     },
 
     outro: {
         // Cards: quick and staggered
-        imagesDuration: 0.28,
-        imagesStaggerStep: 0.055,
-        imagesScaleTo: 0.9,
+        cardDuration: 0.28,
+        cardStaggerStep: 0.055,
+        cardScaleTo: 0.9,
 
         // Calm, high-quality ease-out
         easeOut: [0.22, 1, 0.36, 1],
 
         // Section: fade out all at once (fast)
         sectionDuration: 0.22,
-        sectionDelayAfterImagesMs: 0
+        sectionDelayAfterCardsMs: 0
     }
 };
 
@@ -91,6 +104,40 @@ const sleep = (ms) =>
         setTimeout(resolve, ms);
     });
 
+function waitForImage(src, timeoutMs = 10000) {
+    if (!src) return Promise.reject(new Error("empty src"));
+
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        let done = false;
+
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            if (ok) resolve();
+            else reject(new Error("Image failed: " + src));
+        };
+
+        const t = setTimeout(() => finish(false), timeoutMs);
+        img.decoding = "async";
+        img.loading = "eager";
+        img.onload = () => finish(true);
+        img.onerror = () => finish(false);
+        img.src = src;
+
+        // If decode is supported it can settle earlier than onload in some cases.
+        if (typeof img.decode === "function") {
+            img.decode().then(
+                () => finish(true),
+                () => {
+                    // fall back to onload/onerror
+                }
+            );
+        }
+    });
+}
+
 function clearRetry() {
     if (retryTimer) {
         clearTimeout(retryTimer);
@@ -132,26 +179,18 @@ function getPoolSrcs() {
 async function runOutro(section, items, token) {
     if (token !== runToken) return;
 
-    const delays = stagger(CONFIG.outro.imagesStaggerStep);
-    const imgControls = items.map((el, i) =>
-        // Use stored values so we animate *from* the exact pose we created.
+    const delays = stagger(CONFIG.outro.cardStaggerStep);
+    const imgControls = items.map((it, i) =>
         animate(
-            el,
+            it.el,
             {
                 opacity: [1, 0],
-                scale: [
-                    Number.parseFloat(el.dataset.homeLoadingEndScale || "1"),
-                    CONFIG.outro.imagesScaleTo
-                ],
-                rotate: [
-                    Number.parseFloat(el.dataset.homeLoadingRot || "0"),
-                    0
-                ]
+                scale: [it.pose.endScale, CONFIG.outro.cardScaleTo],
+                rotate: [it.pose.rot, 0]
             },
             {
-                duration: CONFIG.outro.imagesDuration,
-                delay: delays(i)
-                ,
+                duration: CONFIG.outro.cardDuration,
+                delay: delays(i),
                 easing: CONFIG.outro.easeOut
             }
         )
@@ -160,7 +199,7 @@ async function runOutro(section, items, token) {
     await Promise.allSettled(imgControls.map((c) => c.finished));
     if (token !== runToken) return;
 
-    await sleep(CONFIG.outro.sectionDelayAfterImagesMs);
+    await sleep(CONFIG.outro.sectionDelayAfterCardsMs);
     if (token !== runToken) return;
 
     const sectionControl = animate(
@@ -178,24 +217,39 @@ async function runOutro(section, items, token) {
 async function ensureStack(section, layout, token) {
     const pool = getPoolSrcs();
     if (!pool.length) {
-        if (attempts < CONFIG.maxAttempts) {
+        if (attempts < CONFIG.retry.maxAttempts) {
             attempts += 1;
             clearRetry();
             retryTimer = setTimeout(() => {
                 retryTimer = null;
                 init();
-            }, CONFIG.retryDelayMs);
+            }, CONFIG.retry.delayMs);
         } else {
             warn("init: no window.homeLoadingImages");
         }
         return;
     }
 
+    // Delay before doing anything visible or starting any requests
+    await sleep(CONFIG.timing.startDelayMs);
+    if (token !== runToken) return;
+
     attempts = 0;
     clearRetry();
 
-    const chosen = pickSrcs(pool, CONFIG.stackCount);
+    const chosen = pickSrcs(pool, CONFIG.stack.count);
     if (!chosen.length) return;
+
+    // Wait for all 6 images to load before we swap/mount and animate.
+    // Use allSettled to avoid hanging forever if a single URL fails.
+    const loadResults = await Promise.allSettled(chosen.map((src) => waitForImage(src)));
+    if (token !== runToken) return;
+
+    const loadedSrcs = chosen.filter((_, i) => loadResults[i]?.status === "fulfilled");
+    if (loadedSrcs.length !== chosen.length) {
+        warn("Some loading images failed to preload", { loaded: loadedSrcs.length, expected: chosen.length });
+    }
+    if (!loadedSrcs.length) return;
 
     // Replace the single placeholder image, if it exists.
     const placeholder = layout.querySelector("img.loading_image");
@@ -220,7 +274,7 @@ async function ensureStack(section, layout, token) {
     created = [];
     const items = [];
 
-    chosen.forEach((src, i) => {
+    loadedSrcs.slice(0, CONFIG.stack.count).forEach((src) => {
         const item = document.createElement("div");
         item.dataset.homeLoadingStack = "true";
         item.style.position = "absolute";
@@ -241,40 +295,50 @@ async function ensureStack(section, layout, token) {
         item.appendChild(img);
         stackRoot.appendChild(item);
         created.push(item);
-        items.push({ item, i });
+        items.push(item);
+    });
+
+    const count = items.length;
+    const cards = items.map((el, i) => {
+        const isLast = i === count - 1;
+        const rot = CONFIG.stack.lastCardStraight && isLast
+            ? 0
+            : rand(CONFIG.stack.rotateMin, CONFIG.stack.rotateMax);
+
+        const dx = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
+        const dy = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
+        const startRot = rot + rand(-CONFIG.intro.dropRotDelta, CONFIG.intro.dropRotDelta);
+
+        const endScale = 1 + i * CONFIG.intro.scaleStep;
+        const startScale = endScale * CONFIG.intro.dropInScale;
+
+        return {
+            el,
+            pose: { rot, dx, dy, startRot, endScale, startScale }
+        };
     });
 
     // animate in (slow, staggered, rotate/scale down)
-    const delays = stagger(CONFIG.staggerStep);
-    const controls = items.map(({ item }, i) => {
-        const rot = rand(CONFIG.rotateMin, CONFIG.rotateMax);
-        const dx = rand(-CONFIG.offsetPx, CONFIG.offsetPx);
-        const dy = rand(-CONFIG.offsetPx, CONFIG.offsetPx);
-        const startRot = rot + rand(-CONFIG.dropRotDelta, CONFIG.dropRotDelta);
-
-        const endScale = 1 + i * CONFIG.inScaleStep;
-        const startScale = endScale * CONFIG.dropInScale;
-
-        // store target pose for smooth outro later
-        item.dataset.homeLoadingRot = String(rot);
-        item.dataset.homeLoadingEndScale = String(endScale);
+    const delays = stagger(CONFIG.intro.staggerStep);
+    const controls = cards.map((it, i) => {
+        const { dx, dy, startRot, startScale, endScale, rot } = it.pose;
 
         // start pose
-        item.style.opacity = "0";
-        item.style.transform = `translate3d(${dx}px, ${dy + CONFIG.dropInY}px, 0) scale(${startScale}) rotate(${startRot}deg)`;
+        it.el.style.opacity = "0";
+        it.el.style.transform = `translate3d(${dx}px, ${dy + CONFIG.intro.dropInY}px, 0) scale(${startScale}) rotate(${startRot}deg)`;
 
         return animate(
-            item,
+            it.el,
             {
                 opacity: [0, 1],
                 x: [dx, dx],
-                y: [dy + CONFIG.dropInY, dy],
+                y: [dy + CONFIG.intro.dropInY, dy],
                 scale: [startScale, endScale],
                 rotate: [startRot, rot]
             },
             {
-                ...CONFIG.springs.in,
-                duration: CONFIG.durations.in,
+                ...CONFIG.intro.spring,
+                duration: CONFIG.intro.duration,
                 delay: delays(i)
             }
         );
@@ -284,10 +348,10 @@ async function ensureStack(section, layout, token) {
     await Promise.allSettled(controls.map((c) => c.finished));
     if (token !== runToken) return;
 
-    await sleep(CONFIG.holdBeforeOutroMs);
+    await sleep(CONFIG.timing.holdBeforeOutroMs);
     if (token !== runToken) return;
 
-    await runOutro(section, items.map((it) => it.item), token);
+    await runOutro(section, cards, token);
 
     log("mounted stack", created.length);
 }
