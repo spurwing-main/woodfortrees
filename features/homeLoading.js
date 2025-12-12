@@ -43,6 +43,11 @@ const CONFIG = {
         holdBeforeOutroMs: 900
     },
 
+    sectionIntro: {
+        duration: 0.25,
+        easing: [0.22, 1, 0.36, 1]
+    },
+
     intro: {
         // aboutHero-ish drop pose (slower)
         dropInY: -22,
@@ -429,15 +434,27 @@ export function init() {
     const section = document.querySelector(".section_loading");
     if (!section) return;
 
-    // Gate: show at most once per 24h unless dev override cookie is set.
+    // Gate: show at most once per 24h unless dev mode.
     if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
         return;
     }
 
-    // Make sure the loader is visible immediately (before any delay/preload).
+    // Make sure the loader is visible, but animate it in.
+    section.style.display = "";
     section.style.visibility = "visible";
-    section.style.opacity = "1";
+    section.style.opacity = "0";
+
+    const introToken = token;
+    animate(
+        section,
+        { opacity: [0, 1] },
+        { duration: CONFIG.sectionIntro.duration, easing: CONFIG.sectionIntro.easing }
+    ).finished.finally(() => {
+        // If init/destroy raced, don’t force any final state.
+        if (introToken !== runToken) return;
+        section.style.opacity = "1";
+    });
 
     const layout = section.querySelector(".loading_layout") || document.querySelector(".loading_layout");
     if (!layout) return;
