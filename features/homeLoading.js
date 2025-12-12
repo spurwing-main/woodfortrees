@@ -236,6 +236,7 @@ function getPoolSrcs() {
 async function runOutro(section, items, token) {
     if (token !== runToken) return;
 
+    const cardCount = items.length;
     const delays = stagger(CONFIG.outro.cardStaggerStep);
     const imgControls = items.map((it, i) =>
         animate(
@@ -253,19 +254,26 @@ async function runOutro(section, items, token) {
         )
     );
 
-    await Promise.allSettled(imgControls.map((c) => c.finished));
-    if (token !== runToken) return;
-
-    await sleep(CONFIG.outro.sectionDelayAfterCardsMs);
-    if (token !== runToken) return;
+    // Fade the whole section (logos included) so it FINISHES with the last card.
+    // It starts later (computed), but ends at the same time as the staggered cards.
+    const lastCardDelay = Math.max(0, (cardCount - 1) * CONFIG.outro.cardStaggerStep);
+    const lastCardEnd = lastCardDelay + CONFIG.outro.cardDuration;
+    const sectionDelay = Math.max(0, lastCardEnd - CONFIG.outro.sectionDuration);
 
     const sectionControl = animate(
         section,
         { opacity: [1, 0] },
-        { duration: CONFIG.outro.sectionDuration, easing: CONFIG.outro.easeOut }
+        {
+            duration: CONFIG.outro.sectionDuration,
+            delay: sectionDelay,
+            easing: CONFIG.outro.easeOut
+        }
     );
 
-    await Promise.allSettled([sectionControl.finished]);
+    await Promise.allSettled([
+        ...imgControls.map((c) => c.finished),
+        sectionControl.finished
+    ]);
 
     if (token !== runToken) return;
     section.style.display = "none";
@@ -438,6 +446,12 @@ export function init() {
     if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
         return;
+    }
+
+    // If the loader is going to play, reveal the page content immediately.
+    const pageWrap = document.querySelector(".page-wrap");
+    if (pageWrap) {
+        pageWrap.style.opacity = "1";
     }
 
     // Make sure the loader is visible, but animate it in.
