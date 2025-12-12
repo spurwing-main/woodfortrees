@@ -10,11 +10,13 @@ const warn = (...a) => console.warn("[homeLoading]", ...a);
 const CONFIG = {
     gate: {
         // show at most once per 24h
-        seenCookie: "wft_home_loading_seen",
-        cooldownSeconds: 60 * 60 * 24,
+        seenKey: "sitekit_homeLoadingSeen",
+        seenTsKey: "sitekit_homeLoadingSeenTs",
+        cooldownMs: 1000 * 60 * 60 * 24,
 
-        // set to `1` to show every time (dev)
-        devAlwaysCookie: "wft_home_loading_dev"
+        // if `sitekit_mode` is `dev`, always show
+        modeKey: "sitekit_mode",
+        devMode: "dev"
     },
 
     stack: {
@@ -76,37 +78,42 @@ let retryTimer = null;
 let runToken = 0;
 let attempts = 0;
 
-function getCookie(name) {
-    if (!name) return null;
-    const parts = String(document.cookie || "")
-        .split(";")
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-    const prefix = name + "=";
-    const hit = parts.find((p) => p.startsWith(prefix));
-    if (!hit) return null;
-
+function safeStorageGet(key) {
     try {
-        return decodeURIComponent(hit.slice(prefix.length));
+        return window.localStorage?.getItem(key) ?? null;
     } catch {
-        return hit.slice(prefix.length);
+        return null;
     }
 }
 
-function setCookie(name, value, maxAgeSeconds) {
-    if (!name) return;
-    const encoded = encodeURIComponent(String(value ?? ""));
-    const maxAge = Number.isFinite(maxAgeSeconds) ? Math.max(0, maxAgeSeconds) : undefined;
-    document.cookie = `${name}=${encoded}; Path=/; SameSite=Lax${maxAge !== undefined ? `; Max-Age=${maxAge}` : ""}`;
+function safeStorageSet(key, value) {
+    try {
+        window.localStorage?.setItem(key, String(value));
+    } catch {
+        // ignore
+    }
 }
 
-function isDevAlways() {
-    return getCookie(CONFIG.gate.devAlwaysCookie) === "1";
+function isDevMode() {
+    const fromWindow = String(window.sitekit_mode || "").toLowerCase();
+    const fromStorage = String(safeStorageGet(CONFIG.gate.modeKey) || "").toLowerCase();
+    return fromWindow === CONFIG.gate.devMode || fromStorage === CONFIG.gate.devMode;
 }
 
 function hasSeenRecently() {
-    return Boolean(getCookie(CONFIG.gate.seenCookie));
+    const seen = safeStorageGet(CONFIG.gate.seenKey);
+    if (seen !== "true") return false;
+
+    const tsRaw = safeStorageGet(CONFIG.gate.seenTsKey);
+    const ts = Number.parseInt(tsRaw || "", 10);
+    if (!Number.isFinite(ts)) return true;
+
+    return Date.now() - ts < CONFIG.gate.cooldownMs;
+}
+
+function markSeenNow() {
+    safeStorageSet(CONFIG.gate.seenKey, "true");
+    safeStorageSet(CONFIG.gate.seenTsKey, String(Date.now()));
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -297,9 +304,7 @@ async function ensureStack(section, layout, token) {
     if (!loadedSrcs.length) return;
 
     // Mark as seen only when we’re actually going to show.
-    if (!isDevAlways()) {
-        setCookie(CONFIG.gate.seenCookie, "1", CONFIG.gate.cooldownSeconds);
-    }
+    if (!isDevMode()) markSeenNow();
 
     // Replace the single placeholder image, if it exists.
     const placeholder = layout.querySelector("img.loading_image");
@@ -425,10 +430,14 @@ export function init() {
     if (!section) return;
 
     // Gate: show at most once per 24h unless dev override cookie is set.
-    if (!isDevAlways() && hasSeenRecently()) {
+    if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
         return;
     }
+
+    // Make sure the loader is visible immediately (before any delay/preload).
+    section.style.visibility = "visible";
+    section.style.opacity = "1";
 
     const layout = section.querySelector(".loading_layout") || document.querySelector(".loading_layout");
     if (!layout) return;
