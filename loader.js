@@ -33,6 +33,7 @@ function waitForDomReady() {
 const featureList = [
     { name: 'tooltip', load: () => import('./features/footerTooltip.js') },
     { name: 'aboutHero', load: () => import('./features/aboutHero.js') },
+    { name: 'homeLoading', load: () => import('./features/homeLoading.js') },
     { name: 'aboutTeam', load: () => import('./features/aboutTeam.js') },
     { name: 'expertTabs', load: () => import('./features/expertTabs.js') },
     { name: 'testimonialSlider', load: () => import('./features/testimonialSlider.js') },
