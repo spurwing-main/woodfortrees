@@ -491,27 +491,49 @@ export function init() {
 
     for (let i = 0; i < lists.length; i++) {
         const list = lists[i];
+
+        // Only randomise once per page load per list.
+        if (list.dataset.teamRandomised === "true") continue;
+
         const children = Array.from(list.children);
         const ctas = [];
-        const others = [];
+        const nonCtas = [];
 
         for (let j = 0; j < children.length; j++) {
             const el = children[j];
             if (el.classList.contains("team_cta")) {
                 ctas.push(el);
             } else {
-                others.push(el);
+                nonCtas.push(el);
             }
         }
 
-        shuffleInPlace(others);
-
-        for (let j = 0; j < others.length; j++) {
-            list.appendChild(others[j]);
+        // Webflow dynamic lists nest cards inside .w-dyn-items.
+        const dynItems = list.querySelector(".w-dyn-items");
+        if (dynItems) {
+            const dynChildren = Array.from(dynItems.children);
+            if (dynChildren.length > 1) {
+                shuffleInPlace(dynChildren);
+                for (let j = 0; j < dynChildren.length; j++) {
+                    dynItems.appendChild(dynChildren[j]);
+                }
+            }
+        } else {
+            // Static lists: shuffle direct children excluding CTA.
+            if (nonCtas.length > 1) {
+                shuffleInPlace(nonCtas);
+                for (let j = 0; j < nonCtas.length; j++) {
+                    list.appendChild(nonCtas[j]);
+                }
+            }
         }
+
+        // Ensure CTA(s) are last within the list.
         for (let j = 0; j < ctas.length; j++) {
             list.appendChild(ctas[j]);
         }
+
+        list.dataset.teamRandomised = "true";
     }
 
     /* ---- 2. Wire Motion for all non-CTA team cards ---- */
