@@ -39,7 +39,7 @@ const featureList = [
     { name: 'howSlider', load: () => import('./features/howSlider.js') },
     { name: 'contactForm', load: () => import('./features/contactForm.js') },
     // { name: 'homeHoz', load: () => import('./features/homeHoz.js') },
-    { name: 'navLogoTheme', load: () => import('./features/navLogoTheme.js') },
+    // { name: 'navLogoTheme', load: () => import('./features/navLogoTheme.js') },
     { name: 'pastaLlax', load: () => import('./features/pastaLlax.js') },
     // e.g. { name: 'navColorTheme', load: () => import('./features/navColorTheme.js') },
 ]
