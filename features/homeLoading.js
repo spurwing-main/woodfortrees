@@ -7,6 +7,14 @@ const DEBUG = false;
 const log = (...a) => DEBUG && console.log("[homeLoading]", ...a);
 const warn = (...a) => console.warn("[homeLoading]", ...a);
 
+// Always reveal the page content as soon as this feature loads.
+try {
+    document.querySelector(".page-wrap")?.style &&
+        (document.querySelector(".page-wrap").style.opacity = "1");
+} catch {
+    // ignore
+}
+
 const CONFIG = {
     gate: {
         // show at most once per 24h
@@ -446,12 +454,6 @@ export function init() {
     if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
         return;
-    }
-
-    // If the loader is going to play, reveal the page content immediately.
-    const pageWrap = document.querySelector(".page-wrap");
-    if (pageWrap) {
-        pageWrap.style.opacity = "1";
     }
 
     // Make sure the loader is visible, but animate it in.
