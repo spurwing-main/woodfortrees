@@ -7,12 +7,14 @@ const DEBUG = false;
 const log = (...a) => DEBUG && console.log("[homeLoading]", ...a);
 const warn = (...a) => console.warn("[homeLoading]", ...a);
 
-// Always reveal the page content as soon as this feature loads.
-try {
-    document.querySelector(".page-wrap")?.style &&
-        (document.querySelector(".page-wrap").style.opacity = "1");
-} catch {
-    // ignore
+const qs = (selector, root = document) => root.querySelector(selector);
+
+let pageWrapRevealed = false;
+function revealPageWrapOnce() {
+    if (pageWrapRevealed) return;
+    pageWrapRevealed = true;
+    const pageWrap = qs(".page-wrap");
+    if (pageWrap) pageWrap.style.opacity = "1";
 }
 
 const CONFIG = {
@@ -80,8 +82,7 @@ const CONFIG = {
         easeOut: [0.22, 1, 0.36, 1],
 
         // Section: fade out all at once (fast)
-        sectionDuration: 0.22,
-        sectionDelayAfterCardsMs: 0
+        sectionDuration: 0.22
     }
 };
 
@@ -90,6 +91,8 @@ let created = [];
 let retryTimer = null;
 let runToken = 0;
 let attempts = 0;
+
+const isStale = (token) => token !== runToken;
 
 function safeStorageGet(key) {
     try {
@@ -169,37 +172,22 @@ const sleep = (ms) =>
         setTimeout(resolve, ms);
     });
 
-function waitForImage(src, timeoutMs = 10000) {
+function preloadImage(src, timeoutMs = 10000) {
     if (!src) return Promise.reject(new Error("empty src"));
-
     return new Promise((resolve, reject) => {
         const img = new Image();
-        let done = false;
-
-        const finish = (ok) => {
-            if (done) return;
-            done = true;
-            clearTimeout(t);
-            if (ok) resolve();
-            else reject(new Error("Image failed: " + src));
-        };
-
-        const t = setTimeout(() => finish(false), timeoutMs);
+        const timeoutId = setTimeout(() => reject(new Error("Image timeout: " + src)), timeoutMs);
         img.decoding = "async";
         img.loading = "eager";
-        img.onload = () => finish(true);
-        img.onerror = () => finish(false);
+        img.onload = () => {
+            clearTimeout(timeoutId);
+            resolve();
+        };
+        img.onerror = () => {
+            clearTimeout(timeoutId);
+            reject(new Error("Image failed: " + src));
+        };
         img.src = src;
-
-        // If decode is supported it can settle earlier than onload in some cases.
-        if (typeof img.decode === "function") {
-            img.decode().then(
-                () => finish(true),
-                () => {
-                    // fall back to onload/onerror
-                }
-            );
-        }
     });
 }
 
@@ -242,7 +230,7 @@ function getPoolSrcs() {
 }
 
 async function runOutro(section, items, token) {
-    if (token !== runToken) return;
+    if (isStale(token)) return;
 
     const cardCount = items.length;
     const delays = stagger(CONFIG.outro.cardStaggerStep);
@@ -283,7 +271,7 @@ async function runOutro(section, items, token) {
         sectionControl.finished
     ]);
 
-    if (token !== runToken) return;
+    if (isStale(token)) return;
     section.style.display = "none";
 }
 
@@ -299,13 +287,14 @@ async function ensureStack(section, layout, token) {
             }, CONFIG.retry.delayMs);
         } else {
             warn("init: no window.homeLoadingImages");
+            revealPageWrapOnce();
         }
         return;
     }
 
     // Delay before doing anything visible or starting any requests
     await sleep(CONFIG.timing.startDelayMs);
-    if (token !== runToken) return;
+    if (isStale(token)) return;
 
     attempts = 0;
     clearRetry();
@@ -315,20 +304,23 @@ async function ensureStack(section, layout, token) {
 
     // Wait for all 6 images to load before we swap/mount and animate.
     // Use allSettled to avoid hanging forever if a single URL fails.
-    const loadResults = await Promise.allSettled(chosen.map((src) => waitForImage(src)));
-    if (token !== runToken) return;
+    const loadResults = await Promise.allSettled(chosen.map((src) => preloadImage(src)));
+    if (isStale(token)) return;
 
     const loadedSrcs = chosen.filter((_, i) => loadResults[i]?.status === "fulfilled");
     if (loadedSrcs.length !== chosen.length) {
         warn("Some loading images failed to preload", { loaded: loadedSrcs.length, expected: chosen.length });
     }
-    if (!loadedSrcs.length) return;
+    if (!loadedSrcs.length) {
+        revealPageWrapOnce();
+        return;
+    }
 
     // Mark as seen only when we’re actually going to show.
     if (!isDevMode()) markSeenNow();
 
     // Replace the single placeholder image, if it exists.
-    const placeholder = layout.querySelector("img.loading_image");
+    const placeholder = qs("img.loading_image", layout);
     const baseClass = placeholder?.className || "loading_image";
     if (placeholder) placeholder.remove();
 
@@ -347,10 +339,8 @@ async function ensureStack(section, layout, token) {
     layout.insertBefore(stackRoot, layout.firstChild);
 
     // build stack (only 6 <img> get created)
-    created = [];
-    const items = [];
-
-    loadedSrcs.slice(0, CONFIG.stack.count).forEach((src) => {
+    const srcs = loadedSrcs.slice(0, CONFIG.stack.count);
+    created = srcs.map((src) => {
         const item = document.createElement("div");
         item.dataset.homeLoadingStack = "true";
         item.style.position = "absolute";
@@ -370,14 +360,13 @@ async function ensureStack(section, layout, token) {
 
         item.appendChild(img);
         stackRoot.appendChild(item);
-        created.push(item);
-        items.push(item);
+        return item;
     });
 
-    const count = items.length;
+    const count = created.length;
     const startDx = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
     const startDy = rand(-CONFIG.stack.offsetPx, CONFIG.stack.offsetPx);
-    const cards = items.map((el, i) => {
+    const cards = created.map((el, i) => {
         const isLast = i === count - 1;
         const rot = CONFIG.stack.lastCardStraight && isLast
             ? 0
@@ -402,6 +391,9 @@ async function ensureStack(section, layout, token) {
             pose: { rot, dx, dy, startRot, endScale, startScale }
         };
     });
+
+    // Loader is definitely playing now (images are mounted and ready) → reveal the page.
+    revealPageWrapOnce();
 
     // animate in (slow, staggered, rotate/scale down)
     const delays = stagger(CONFIG.intro.staggerStep);
@@ -431,10 +423,10 @@ async function ensureStack(section, layout, token) {
 
     // Wait for all IN animations to finish, then hold, then outro
     await Promise.allSettled(controls.map((c) => c.finished));
-    if (token !== runToken) return;
+    if (isStale(token)) return;
 
     await sleep(CONFIG.timing.holdBeforeOutroMs);
-    if (token !== runToken) return;
+    if (isStale(token)) return;
 
     await runOutro(section, cards, token);
 
@@ -445,14 +437,20 @@ export function init() {
     // Clean up previous mount if called twice
     destroy();
 
+    pageWrapRevealed = false;
+
     const token = runToken;
 
-    const section = document.querySelector(".section_loading");
-    if (!section) return;
+    const section = qs(".section_loading");
+    if (!section) {
+        revealPageWrapOnce();
+        return;
+    }
 
     // Gate: show at most once per 24h unless dev mode.
     if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
+        revealPageWrapOnce();
         return;
     }
 
@@ -462,11 +460,14 @@ export function init() {
     section.style.opacity = "0";
 
     const introToken = token;
-    animate(
+    const sectionIntro = animate(
         section,
         { opacity: [0, 1] },
         { duration: CONFIG.sectionIntro.duration, easing: CONFIG.sectionIntro.easing }
-    ).finished.finally(() => {
+    );
+
+    // Keep loader opacity consistent; page reveal is controlled later (when images are ready).
+    sectionIntro.finished.finally(() => {
         // If init/destroy raced, don’t force any final state.
         if (introToken !== runToken) return;
         section.style.opacity = "1";
