@@ -1,12 +1,28 @@
 import {
     scroll,
     motionValue,
+    mapValue,
     springValue,
     styleEffect,
     transformValue,
 } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
+let cleanupFns = [];
+
+export function destroy() {
+    cleanupFns.splice(0).forEach((fn) => {
+        try {
+            fn();
+        } catch (err) {
+            console.warn("pastaLlax destroy", err);
+        }
+    });
+    cleanupFns = [];
+}
+
 export function init() {
+    destroy();
+
     const sections = document.querySelectorAll(".hero_pastallax");
     if (!sections.length) return;
 
@@ -46,9 +62,11 @@ export function init() {
         const progress = motionValue(0);
         const smoothProgress = springValue(progress, SPRING_CONFIG);
 
+        const backExtra = mapValue(smoothProgress, [0, 1], [0, BACK_DELTA_PX]);
+        const frontExtra = mapValue(smoothProgress, [0, 1], [0, FRONT_DELTA_PX]);
+
         const backTransform = transformValue(() => {
-            const p = smoothProgress.get();
-            const extra = BACK_DELTA_PX * p;
+            const extra = backExtra.get();
 
             return backBase
                 ? `${backBase} translate3d(0, ${extra}px, 0)`
@@ -56,16 +74,17 @@ export function init() {
         });
 
         const frontTransform = transformValue(() => {
-            const p = smoothProgress.get();
-            const extra = FRONT_DELTA_PX * p;
+            const extra = frontExtra.get();
 
             return frontBase
                 ? `${frontBase} translate3d(0, ${extra}px, 0)`
                 : `translate3d(0, ${extra}px, 0)`;
         });
 
-        styleEffect(back, { transform: backTransform });
-        styleEffect(front, { transform: frontTransform });
+        const cancelBack = styleEffect(back, { transform: backTransform });
+        const cancelFront = styleEffect(front, { transform: frontTransform });
+
+        cleanupFns.push(cancelBack, cancelFront);
 
         // === Scroll → progress mapping with "no move before scroll" ===
 
@@ -73,7 +92,7 @@ export function init() {
         let hasUserScrolled = false;
         let initialProgress = 0;
 
-        scroll(
+        const cancelScroll = scroll(
             (p) => {
                 const currentScrollY = window.scrollY;
                 const deltaY = currentScrollY - startScrollY;
@@ -102,5 +121,7 @@ export function init() {
                 offset: SCROLL_OFFSET,
             }
         );
+
+        cleanupFns.push(cancelScroll);
     });
 }

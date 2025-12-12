@@ -93,6 +93,14 @@ async function boot() {
 
             // auto-init if available
             if (typeof mod.init === 'function') {
+                // If boot() is called multiple times, prevent double-binding
+                if (typeof mod.destroy === 'function') {
+                    try {
+                        mod.destroy()
+                    } catch (error) {
+                        console.warn('sitekit feature destroy failed', feature.name, error?.message || error)
+                    }
+                }
                 mod.init()
             }
 

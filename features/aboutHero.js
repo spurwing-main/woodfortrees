@@ -54,12 +54,42 @@ let autoTimer = null;
 let isBusy = false;      // any swap / theme transition in-flight
 let queuedTheme = null;  // at most one queued theme, last click wins
 
+let cleanupFns = [];
+
 // remember the last couple of auto-swapped slots
 let lastAutoSlotHistory = []; // [mostRecent, previous]
 
 // cached DOM for queued theme changes
 let sectionEl = null;
 let titleEl = null;
+
+export function destroy() {
+    // cancel timers
+    if (autoTimer) {
+        clearTimeout(autoTimer);
+        autoTimer = null;
+    }
+
+    // remove event listeners
+    cleanupFns.splice(0).forEach((fn) => {
+        try {
+            fn();
+        } catch (err) {
+            warn("destroy cleanup error", err);
+        }
+    });
+
+    // clear DOM we created
+    slots.forEach((s) => s.item?.remove());
+    slots = [];
+
+    // reset state
+    isBusy = false;
+    queuedTheme = null;
+    lastAutoSlotHistory = [];
+    sectionEl = null;
+    titleEl = null;
+}
 
 // ===== utilities =====
 
@@ -400,13 +430,33 @@ async function swapSlotImage(slot, nextSrc) {
     setDropPose(newItem);
     slot.block.appendChild(newItem);
 
-    // OUT and IN are scheduled together, IN is offset by CONFIG.offsets.singleIn
-    const outAnim = animateOutSingle(oldItem, 0);
-    const inAnim = animateInSingle(newItem, CONFIG.offsets.singleIn);
+    // KISS: schedule OUT + IN as a single sequence.
+    // IN starts at CONFIG.offsets.singleIn seconds.
+    const { dropInY, dropInScale, dropRot, springs, durations } = CONFIG;
 
-    await Promise.all([outAnim.finished, inAnim.finished]).catch(
-        () => { }
-    );
+    const seq = animate([
+        [
+            oldItem,
+            { opacity: [1, 0], scale: [1, 0.9] },
+            { ...springs.in, duration: durations.singleOut, at: 0 }
+        ],
+        [
+            newItem,
+            {
+                opacity: [0, 1],
+                y: [dropInY, 0],
+                scale: [dropInScale, 1],
+                rotate: [dropRot, 0]
+            },
+            {
+                ...springs.in,
+                duration: durations.singleIn,
+                at: CONFIG.offsets.singleIn
+            }
+        ]
+    ]);
+
+    await seq.finished.catch(() => { });
 
     oldItem.remove();
     slot.item = newItem;
@@ -517,6 +567,9 @@ async function changeTheme(key) {
 export function init() {
     log("init start");
 
+    // Clean up previous mount if called twice
+    destroy();
+
     const section = document.querySelector(".section_about");
     const layout = document.querySelector(".about_layout");
     const title = document.querySelector(".about_title");
@@ -537,17 +590,6 @@ export function init() {
 
     sectionEl = section;
     titleEl = title;
-
-    // reset any previous run
-    if (autoTimer) {
-        clearTimeout(autoTimer);
-        autoTimer = null;
-    }
-    slots.forEach((s) => s.item?.remove());
-    slots = [];
-    isBusy = false;
-    queuedTheme = null;
-    lastAutoSlotHistory = [];
 
     pools = buildPools();
     if (!pools.people.length && !pools.places.length) {
@@ -618,7 +660,7 @@ export function init() {
 
     // theme buttons: always go through queueing logic
     buttons.forEach((btn) => {
-        btn.addEventListener("click", () => {
+        const onClick = () => {
             const key = (btn.dataset.aboutHero || "")
                 .toLowerCase()
                 .trim();
@@ -629,7 +671,10 @@ export function init() {
 
             // changeTheme handles isBusy/queueing itself
             changeTheme(key);
-        });
+        };
+
+        btn.addEventListener("click", onClick);
+        cleanupFns.push(() => btn.removeEventListener("click", onClick));
     });
 
     log("init wired, theme =", theme);

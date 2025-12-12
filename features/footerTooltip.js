@@ -1,10 +1,38 @@
-import { animate } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
+import { animate, hover, press } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
 let tooltipEl;
 let liveEl;
 let repositionBound = false;
 let activeEl = null;
 let visible = false;
+let cleanupFns = [];
+let repositionHandler = null;
+
+export function destroy() {
+    cleanupFns.splice(0).forEach((fn) => {
+        try {
+            fn();
+        } catch (err) {
+            console.warn("footerTooltip destroy", err);
+        }
+    });
+    cleanupFns = [];
+
+    if (repositionBound && repositionHandler) {
+        window.removeEventListener("scroll", repositionHandler);
+        window.removeEventListener("resize", repositionHandler);
+    }
+    repositionBound = false;
+    repositionHandler = null;
+
+    // Leave DOM nodes in place (cheap reuse), but reset state
+    activeEl = null;
+    visible = false;
+    if (tooltipEl) {
+        tooltipEl.setAttribute("aria-hidden", "true");
+        tooltipEl.style.opacity = "0";
+    }
+}
 
 function positionTooltip() {
     if (!tooltipEl || !activeEl) return;
@@ -24,11 +52,11 @@ function positionTooltip() {
 
 function ensureRepositionListeners() {
     if (repositionBound) return;
-    const reposition = () => {
+    repositionHandler = () => {
         if (visible) positionTooltip();
     };
-    window.addEventListener("scroll", reposition, { passive: true });
-    window.addEventListener("resize", reposition, { passive: true });
+    window.addEventListener("scroll", repositionHandler, { passive: true });
+    window.addEventListener("resize", repositionHandler, { passive: true });
     repositionBound = true;
 }
 
@@ -86,6 +114,8 @@ function ensureLiveRegion() {
 }
 
 export function init() {
+    destroy();
+
     const nodes = document.querySelectorAll("[data-copy]");
     if (!nodes.length) return;
 
@@ -169,27 +199,45 @@ export function init() {
     };
 
     nodes.forEach((el) => {
-        if (el.dataset.sitekitCopyBound) return;
-        el.dataset.sitekitCopyBound = "true";
-
-        el.addEventListener("mouseenter", () => onEnter(el), { passive: true });
-        el.addEventListener("focus", () => onEnter(el), { passive: true });
-        el.addEventListener("mouseleave", onLeave, { passive: true });
-        el.addEventListener("blur", onLeave, { passive: true });
-
-        el.addEventListener("click", async (event) => {
-            event.preventDefault();
-
-            const text = (el.value ?? el.textContent ?? "").trim();
-            if (!text) return flash(el, "Nothing to copy");
-
-            try {
-                await navigator.clipboard.writeText(text);
-                flash(el, "Copied");
-            } catch {
-                flash(el, "Copy failed");
-            }
+        // Hover tooltip (filters fake hover from touch)
+        const cancelHover = hover(el, () => {
+            onEnter(el);
+            return () => onLeave();
         });
+
+        // Focus tooltip (keyboard)
+        const onFocus = () => onEnter(el);
+        const onBlur = () => onLeave();
+        el.addEventListener("focus", onFocus, { passive: true });
+        el.addEventListener("blur", onBlur, { passive: true });
+
+        // Press to copy (pointer + keyboard accessible)
+        const cancelPress = press(el, () => {
+            // Keep behaviour consistent with previous click handler
+            return async (endEvent, info) => {
+                if (!info?.success) return;
+
+                // Prevent default click navigation if this is a link
+                endEvent?.preventDefault?.();
+
+                const text = (el.value ?? el.textContent ?? "").trim();
+                if (!text) return flash(el, "Nothing to copy");
+
+                try {
+                    await navigator.clipboard.writeText(text);
+                    flash(el, "Copied");
+                } catch {
+                    flash(el, "Copy failed");
+                }
+            };
+        });
+
+        cleanupFns.push(
+            cancelHover,
+            cancelPress,
+            () => el.removeEventListener("focus", onFocus),
+            () => el.removeEventListener("blur", onBlur)
+        );
     });
 
     ensureRepositionListeners();

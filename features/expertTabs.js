@@ -1,4 +1,4 @@
-import { animate } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm"
+import { animate, press } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm"
 
 let cleanupFns = []
 
@@ -108,15 +108,21 @@ export function init() {
         activeIndex = nextIndex
     }
 
-    // Click-only interaction
+    // Gesture interaction (pointer + keyboard)
     tabs.forEach((tab, index) => {
         const onClick = (event) => {
+            // Preserve previous behaviour (e.g. if tabs are anchors)
             event.preventDefault()
-            setActive(index)
         }
 
         tab.addEventListener("click", onClick)
         cleanupFns.push(() => tab.removeEventListener("click", onClick))
+
+        const cancelPress = press(tab, () => {
+            setActive(index)
+        })
+
+        cleanupFns.push(cancelPress)
     })
 }
 

@@ -1,4 +1,17 @@
-import { animate, hover } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
+import { animate, hover, press } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
+
+let cleanupFns = [];
+
+export function destroy() {
+    cleanupFns.splice(0).forEach((fn) => {
+        try {
+            fn();
+        } catch (err) {
+            console.warn("aboutTeam destroy", err);
+        }
+    });
+    cleanupFns = [];
+}
 
 /* -------------------------------
    motion config
@@ -233,6 +246,8 @@ function createStateController(img1, img2, img3, bio, countItems = []) {
 function wireInteractions(card, media, img1, img2, img3, bio, options = {}) {
     const { enableHover = true, isCoarsePointer = false } = options;
 
+    const localCleanup = [];
+
     const countItems = Array.from(
         media.querySelectorAll(".team_item-count-item")
     );
@@ -319,7 +334,7 @@ function wireInteractions(card, media, img1, img2, img3, bio, options = {}) {
     }
 
     if (enableHover && !isCoarsePointer) {
-        hover(card, (element, startEvent) => {
+        const cancelHover = hover(card, (element, startEvent) => {
             processPointer(startEvent);
 
             moveHandler = (event) => {
@@ -348,44 +363,65 @@ function wireInteractions(card, media, img1, img2, img3, bio, options = {}) {
                 controller.setState(0);
             };
         });
+
+        localCleanup.push(cancelHover);
     }
 
     /* ---------- CLICK / TAP / SWIPE: cycle through states ---------- */
 
-    let downPos = null;
-    let downTime = 0;
+    const cancelPress = press(card, (_element, startEvent) => {
+        const startTime = performance.now();
+        const startX = typeof startEvent?.clientX === "number" ? startEvent.clientX : null;
+        const startY = typeof startEvent?.clientY === "number" ? startEvent.clientY : null;
+        const pointerType = startEvent?.pointerType;
 
-    card.addEventListener("pointerdown", (event) => {
-        if (!isCoarsePointer && event.pointerType === "mouse" && event.button !== 0) {
-            return;
-        }
-        downPos = { x: event.clientX, y: event.clientY };
-        downTime = performance.now();
-    });
+        return async (endEvent, info) => {
+            if (!info?.success) return;
 
-    card.addEventListener("pointerup", async (event) => {
-        if (!downPos) return;
+            const dt = performance.now() - startTime;
+            const endX = typeof endEvent?.clientX === "number" ? endEvent.clientX : null;
+            const endY = typeof endEvent?.clientY === "number" ? endEvent.clientY : null;
 
-        const dt = performance.now() - downTime;
-        const dx = event.clientX - downPos.x;
-        const dy = event.clientY - downPos.y;
-        const distSq = dx * dx + dy * dy;
-        downPos = null;
+            const isTouch = isCoarsePointer || pointerType === "touch";
+            const isMouse = pointerType === "mouse";
 
-        if (isCoarsePointer) {
-            // touch: simple tap / short swipe = cycle
-            if (dt > 800) return;
+            if (isTouch) {
+                // touch: simple tap / short swipe = cycle
+                if (dt > 800) return;
+            } else if (isMouse) {
+                // desktop click: quick + small movement only
+                if (dt > 500) return;
+                if (
+                    startX !== null &&
+                    startY !== null &&
+                    endX !== null &&
+                    endY !== null
+                ) {
+                    const dx = endX - startX;
+                    const dy = endY - startY;
+                    const distSq = dx * dx + dy * dy;
+                    if (distSq > 400) return;
+                }
+            } else {
+                // keyboard/unknown pointer type: accept
+            }
+
             const next = (controller.state + 1) % 4;
             await controller.setState(next);
-            return;
-        }
-
-        // desktop click: quick + small movement only
-        if (dt > 500 || distSq > 400) return;
-
-        const next = (controller.state + 1) % 4;
-        await controller.setState(next);
+        };
     });
+
+    localCleanup.push(cancelPress);
+
+    return () => {
+        localCleanup.splice(0).forEach((fn) => {
+            try {
+                fn();
+            } catch {
+                // ignore
+            }
+        });
+    };
 }
 
 /* -------------------------------
@@ -446,6 +482,9 @@ export function init() {
     const root = document.querySelector(".section_team");
     if (!root) return;
 
+    // Clean up previous mount if called twice
+    destroy();
+
     /* ---- 1. Randomise card order, keep .team_cta last in each .team_list ---- */
 
     const lists = Array.from(root.querySelectorAll(".team_list"));
@@ -499,7 +538,7 @@ export function init() {
 
         setupStack(media, img1, img2, img3, bio);
 
-        wireInteractions(
+        const cleanup = wireInteractions(
             item,
             media,
             img1,
@@ -511,5 +550,7 @@ export function init() {
                 isCoarsePointer,
             }
         );
+
+        if (typeof cleanup === "function") cleanupFns.push(cleanup);
     }
 }
