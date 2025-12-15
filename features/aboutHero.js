@@ -84,6 +84,13 @@ export function destroy() {
 
     // clear DOM we created
     slots.forEach((s) => s.item?.remove());
+    
+    // also reset any styles we applied to blocks
+    slots.forEach((s) => {
+        if (s.block) {
+            s.block.style.position = "";
+        }
+    });
     slots = [];
 
     // reset state
@@ -691,6 +698,11 @@ export function init() {
 
             const tBuild = now();
             blocks.forEach((block, i) => {
+                // Remove any stale items from previous mounts (internal nav scenario)
+                Array.from(block.querySelectorAll(".about_block-item")).forEach(
+                    (stale) => stale.remove()
+                );
+                
                 const src = initialSrcs[i % initialSrcs.length];
                 const { item, img } = makeItem(src);
                 setDropPose(item);
