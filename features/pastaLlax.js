@@ -40,12 +40,11 @@ export function init() {
     const SCROLL_OFFSET = ["start end", "end start"];
 
     sections.forEach((section) => {
-        const images = section.querySelectorAll("img");
-        if (images.length < 3) return;
+        const back = section.querySelector("img.hero_img.is-background");
+        const mid = section.querySelector("img.hero_img.is-mid");
+        const front = section.querySelector("img.hero_img.is-foreground");
 
-        const back = images[0];
-        const mid = images[1];
-        const front = images[2];
+        if (!back || !mid || !front) return;
 
         const backComputed = getComputedStyle(back).transform;
         const frontComputed = getComputedStyle(front).transform;

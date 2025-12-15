@@ -85,7 +85,7 @@ export function init() {
         // If nav is fixed, this stays stable except on resize.
         navLineOffset = nav.getBoundingClientRect().bottom;
 
-        const y = window.scrollY || window.pageYOffset || 0;
+        const y = window.scrollY;
         bounds = sections
             .map(({ el, theme }) => {
                 const rect = el.getBoundingClientRect();
@@ -132,11 +132,11 @@ export function init() {
     }
 
     measure();
-    updateFromScrollY(window.scrollY || window.pageYOffset || 0);
+    updateFromScrollY(window.scrollY);
 
     const cancelResize = resize(() => {
         measure();
-        updateFromScrollY(window.scrollY || window.pageYOffset || 0);
+        updateFromScrollY(window.scrollY);
     });
     if (typeof cancelResize === "function") cleanupFns.push(cancelResize);
 

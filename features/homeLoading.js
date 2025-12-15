@@ -3,18 +3,16 @@
 
 import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
-const DEBUG = false;
-const log = (...a) => DEBUG && console.log("[homeLoading]", ...a);
+import { createLogger, isDevMode } from "../utils/debug.js";
+
+const { log } = createLogger("homeLoading");
 const warn = (...a) => console.warn("[homeLoading]", ...a);
 
 const qs = (selector, root = document) => root.querySelector(selector);
 
-let pageWrapRevealed = false;
 function revealPageWrapOnce() {
-    if (pageWrapRevealed) return;
-    pageWrapRevealed = true;
-    const pageWrap = qs(".page-wrap");
-    if (pageWrap) pageWrap.style.opacity = "1";
+    log("revealPageWrapOnce()");
+    window.sitekit.pageWrapGate.reveal();
 }
 
 const CONFIG = {
@@ -24,9 +22,7 @@ const CONFIG = {
         seenTsKey: "sitekit_homeLoadingSeenTs",
         cooldownMs: 1000 * 60 * 60 * 24,
 
-        // if `sitekit_mode` is `dev`, always show
-        modeKey: "sitekit_mode",
-        devMode: "dev"
+        // if sitekit_mode is dev, always show
     },
 
     stack: {
@@ -89,6 +85,7 @@ const CONFIG = {
 let stackRoot = null;
 let created = [];
 let retryTimer = null;
+let revealTimer = null;
 let runToken = 0;
 let attempts = 0;
 
@@ -110,12 +107,6 @@ function safeStorageSet(key, value) {
     }
 }
 
-function isDevMode() {
-    const fromWindow = String(window.sitekit_mode || "").toLowerCase();
-    const fromStorage = String(safeStorageGet(CONFIG.gate.modeKey) || "").toLowerCase();
-    return fromWindow === CONFIG.gate.devMode || fromStorage === CONFIG.gate.devMode;
-}
-
 function hasSeenRecently() {
     const seen = safeStorageGet(CONFIG.gate.seenKey);
     if (seen !== "true") return false;
@@ -130,6 +121,7 @@ function hasSeenRecently() {
 function markSeenNow() {
     safeStorageSet(CONFIG.gate.seenKey, "true");
     safeStorageSet(CONFIG.gate.seenTsKey, String(Date.now()));
+    log("markSeenNow()", { ts: safeStorageGet(CONFIG.gate.seenTsKey) });
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -172,6 +164,11 @@ const sleep = (ms) =>
         setTimeout(resolve, ms);
     });
 
+const nextPaint = () =>
+    new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+
 function preloadImage(src, timeoutMs = 10000) {
     if (!src) return Promise.reject(new Error("empty src"));
     return new Promise((resolve, reject) => {
@@ -198,10 +195,20 @@ function clearRetry() {
     }
 }
 
+function clearRevealTimer() {
+    if (revealTimer) {
+        clearTimeout(revealTimer);
+        revealTimer = null;
+    }
+}
+
 export function destroy() {
     clearRetry();
+    clearRevealTimer();
     attempts = 0;
     runToken += 1;
+
+    log("destroy()", { runToken });
 
     created.splice(0).forEach((el) => {
         try {
@@ -276,6 +283,7 @@ async function runOutro(section, items, token) {
 }
 
 async function ensureStack(section, layout, token) {
+    log("ensureStack() start", { token });
     const pool = getPoolSrcs();
     if (!pool.length) {
         if (attempts < CONFIG.retry.maxAttempts) {
@@ -287,6 +295,7 @@ async function ensureStack(section, layout, token) {
             }, CONFIG.retry.delayMs);
         } else {
             warn("init: no window.homeLoadingImages");
+            log("ensureStack(): no pool; reveal");
             revealPageWrapOnce();
         }
         return;
@@ -296,22 +305,32 @@ async function ensureStack(section, layout, token) {
     await sleep(CONFIG.timing.startDelayMs);
     if (isStale(token)) return;
 
+    log("ensureStack(): after startDelay");
+
     attempts = 0;
     clearRetry();
 
     const chosen = pickSrcs(pool, CONFIG.stack.count);
     if (!chosen.length) return;
 
+    log("ensureStack(): chosen", { count: chosen.length });
+
     // Wait for all 6 images to load before we swap/mount and animate.
     // Use allSettled to avoid hanging forever if a single URL fails.
     const loadResults = await Promise.allSettled(chosen.map((src) => preloadImage(src)));
     if (isStale(token)) return;
+
+    log(
+        "ensureStack(): preload complete",
+        loadResults.map((r) => r.status)
+    );
 
     const loadedSrcs = chosen.filter((_, i) => loadResults[i]?.status === "fulfilled");
     if (loadedSrcs.length !== chosen.length) {
         warn("Some loading images failed to preload", { loaded: loadedSrcs.length, expected: chosen.length });
     }
     if (!loadedSrcs.length) {
+        log("ensureStack(): none loaded; reveal");
         revealPageWrapOnce();
         return;
     }
@@ -392,9 +411,7 @@ async function ensureStack(section, layout, token) {
         };
     });
 
-    // Loader is definitely playing now (images are mounted and ready) → reveal the page.
-    revealPageWrapOnce();
-
+    // Requirement: don't reveal until AFTER the loader starts.
     // animate in (slow, staggered, rotate/scale down)
     const delays = stagger(CONFIG.intro.staggerStep);
     const controls = cards.map((it, i) => {
@@ -421,6 +438,22 @@ async function ensureStack(section, layout, token) {
         );
     });
 
+    log("ensureStack(): intro animations created", { count: controls.length });
+
+    // Requirement: don't reveal until AFTER homeLoading actually kicks in.
+    // Anchor the fixed 1s delay to the moment the stack animations exist.
+    clearRevealTimer();
+    void nextPaint().then(() => {
+        if (isStale(token)) return;
+        clearRevealTimer();
+        log("ensureStack(): scheduling page reveal in 1000ms");
+        revealTimer = setTimeout(() => {
+            if (isStale(token)) return;
+            log("ensureStack(): reveal timer fired");
+            revealPageWrapOnce();
+        }, 1000);
+    });
+
     // Wait for all IN animations to finish, then hold, then outro
     await Promise.allSettled(controls.map((c) => c.finished));
     if (isStale(token)) return;
@@ -437,19 +470,20 @@ export function init() {
     // Clean up previous mount if called twice
     destroy();
 
-    pageWrapRevealed = false;
-
     const token = runToken;
+
+    log("init()", { token });
 
     const section = qs(".section_loading");
     if (!section) {
-        revealPageWrapOnce();
+        log("init(): no .section_loading; noop");
         return;
     }
 
     // Gate: show at most once per 24h unless dev mode.
     if (!isDevMode() && hasSeenRecently()) {
         section.style.display = "none";
+        log("init(): skipped (seen recently)");
         revealPageWrapOnce();
         return;
     }
@@ -459,12 +493,16 @@ export function init() {
     section.style.visibility = "visible";
     section.style.opacity = "0";
 
+    log("init(): loader visible; starting intro");
+
     const introToken = token;
     const sectionIntro = animate(
         section,
         { opacity: [0, 1] },
         { duration: CONFIG.sectionIntro.duration, easing: CONFIG.sectionIntro.easing }
     );
+
+    // Reveal scheduling happens in ensureStack() once the stack animation actually starts.
 
     // Keep loader opacity consistent; page reveal is controlled later (when images are ready).
     sectionIntro.finished.finally(() => {
@@ -473,8 +511,10 @@ export function init() {
         section.style.opacity = "1";
     });
 
-    const layout = section.querySelector(".loading_layout") || document.querySelector(".loading_layout");
+    const layout = section.querySelector(".loading_layout");
     if (!layout) return;
+
+    log("init(): found layout; mounting stack");
 
     // If we already mounted somehow, remove any remnants first
     Array.from(layout.querySelectorAll("[data-home-loading-stack='true']")).forEach((el) => el.remove());

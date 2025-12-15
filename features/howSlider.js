@@ -12,7 +12,7 @@ export function init() {
     const container = scope.querySelector('.embla__container')
     if (!container) return
 
-    const query = maxWidthQuery('tablet') || '(max-width: 991px)'
+    const query = maxWidthQuery('tablet')
     const mql = window.matchMedia(query)
 
     const options = {

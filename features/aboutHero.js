@@ -3,9 +3,12 @@
 
 import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@12.23.26/+esm";
 
-const DEBUG = false;
-const log = (...a) => DEBUG && console.log("[aboutHero]", ...a);
-const warn = (...a) => console.warn("[aboutHero]", ...a);
+import { createLogger } from "../utils/debug.js";
+
+const { log, warn } = createLogger("aboutHero");
+
+const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+const dur = (t0) => Math.round(now() - t0);
 
 const CONFIG = {
     maxPoolSize: 32,
@@ -37,7 +40,7 @@ const CONFIG = {
     },
 
     staggerStep: 0.06,
-    autoDelayMin: 800,
+    autoDelayMin: 500,
     autoDelayMax: 2000
 };
 
@@ -109,10 +112,16 @@ const shuffle = (arr) => {
     return a;
 };
 
+const nextPaint = () =>
+    new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+
 function preload(src) {
     if (!src) return Promise.reject(new Error("empty src"));
     let p = imageCache.get(src);
-    if (p) return p;
+    if (p) {
+        log("preload cache hit", src);
+        return p;
+    }
 
     log("preload start", src);
     p = new Promise((resolve, reject) => {
@@ -130,6 +139,11 @@ function preload(src) {
         img.src = src;
     });
     imageCache.set(src, p);
+    p.catch(() => {
+        try {
+            imageCache.delete(src);
+        } catch { }
+    });
     return p;
 }
 
@@ -189,7 +203,6 @@ function makeItem(src) {
     img.className = "about_block-img";
     img.alt = "";
     img.decoding = "async";
-    img.loading = "eager";
     img.src = src;
 
     frame.appendChild(img);
@@ -319,11 +332,14 @@ function animateListOut(elements, baseDelay = 0) {
 function scheduleAuto() {
     if (!slots.length) return;
     const delay = rand(CONFIG.autoDelayMin, CONFIG.autoDelayMax);
+    log("auto: schedule", { delayMs: Math.round(delay), theme, slots: slots.length });
     autoTimer = window.setTimeout(runAutoSwap, delay);
 }
 
 async function runAutoSwap() {
     autoTimer = null;
+
+    const t0 = now();
 
     if (!slots.length || isBusy) {
         scheduleAuto();
@@ -394,16 +410,32 @@ async function runAutoSwap() {
     const nextSrc =
         candidates[(Math.random() * candidates.length) | 0];
 
+    log("auto: swap start", {
+        slotIndex,
+        from: slot.src,
+        to: nextSrc,
+        theme,
+        poolSize: pool.length,
+        candidates: candidates.length
+    });
+
     isBusy = true;
 
     try {
         // load-aware single swap
+        const tPre = now();
         await preload(nextSrc);
+        log("auto: preload done", { ms: dur(tPre), src: nextSrc });
+
+        const tSwap = now();
         await swapSlotImage(slot, nextSrc);
+        log("auto: swap done", { ms: dur(tSwap), slotIndex });
     } catch (err) {
         warn("auto swap error", err);
     } finally {
         isBusy = false;
+
+        log("auto: cycle done", { ms: dur(t0) });
 
         // If a theme switch was queued during this auto swap, run it now
         if (queuedTheme && queuedTheme !== theme && sectionEl && titleEl) {
@@ -411,19 +443,14 @@ async function runAutoSwap() {
             queuedTheme = null;
             changeTheme(nextKey);
         } else {
-            // carry on as normal, plus a little "next next" preload
-            const poolAny = pools[theme] || [];
-            const extra =
-                poolAny[(Math.random() * poolAny.length) | 0] || null;
-            if (extra) {
-                preload(extra).catch(() => { });
-            }
+            // carry on as normal
             scheduleAuto();
         }
     }
 }
 
 async function swapSlotImage(slot, nextSrc) {
+    const t0 = now();
     const oldItem = slot.item;
 
     const { item: newItem, img: newImg } = makeItem(nextSrc);
@@ -458,6 +485,8 @@ async function swapSlotImage(slot, nextSrc) {
 
     await seq.finished.catch(() => { });
 
+    log("swapSlotImage: animations done", { ms: dur(t0) });
+
     oldItem.remove();
     slot.item = newItem;
     slot.img = newImg;
@@ -467,6 +496,7 @@ async function swapSlotImage(slot, nextSrc) {
 // ===== theme change (global list animation) =====
 
 async function changeTheme(key) {
+    const t0 = now();
     const pool = pools[key];
     if (!pool || !pool.length) {
         warn("changeTheme: empty pool", key);
@@ -498,6 +528,15 @@ async function changeTheme(key) {
     // UI state + future click logic now track this as "current".
     theme = key;
 
+    // Switch classes first so the UI responds instantly.
+    // Then allow the browser to paint before doing heavier work/animations.
+    applyThemeClasses(key);
+    syncTitleActive(key);
+
+    const tPaint = now();
+    await nextPaint();
+    log("changeTheme: after paint", { ms: dur(tPaint), key });
+
     const count = slots.length;
     const newSrcs = pickSrcs(pool, count);
     if (!newSrcs.length) {
@@ -507,16 +546,20 @@ async function changeTheme(key) {
     }
 
     const preloadList = dedupe(newSrcs);
-    log("changeTheme:", key, "slots:", count);
+    log("changeTheme: start", { key, slots: count, poolSize: pool.length, preloadCount: preloadList.length });
 
     try {
         // preload everything this theme needs for the slots
-        await Promise.allSettled(preloadList.map(preload));
+        const tPre = now();
+        const preResults = await Promise.allSettled(preloadList.map(preload));
+        const preOk = preResults.filter((r) => r.status === "fulfilled").length;
+        log("changeTheme: preload done", { ms: dur(tPre), ok: preOk, total: preResults.length });
 
         const oldItems = [];
         const newItems = [];
 
         // build new items but don't remove old yet
+        const tBuild = now();
         slots.forEach((slot, i) => {
             const src = newSrcs[i % newSrcs.length];
             const { item, img } = makeItem(src);
@@ -530,9 +573,7 @@ async function changeTheme(key) {
             slot.img = img;
             slot.src = src;
         });
-
-        applyThemeClasses(key);
-        syncTitleActive(key);
+        log("changeTheme: built new items", { ms: dur(tBuild), count: slots.length });
 
         // Global OUT + IN triggered at the same time:
         // - OUT: scale+fade with stagger
@@ -543,9 +584,13 @@ async function changeTheme(key) {
             CONFIG.offsets.globalIn
         );
 
+        const tAnim = now();
         await Promise.all([outPromise, inPromise]);
+        log("changeTheme: animations done", { ms: dur(tAnim) });
 
         oldItems.forEach((el) => el.remove());
+
+        log("changeTheme: done", { key, ms: dur(t0) });
     } catch (err) {
         warn("changeTheme error", err);
     } finally {
@@ -565,6 +610,7 @@ async function changeTheme(key) {
 // ===== public init =====
 
 export function init() {
+    const t0 = now();
     log("init start");
 
     // Clean up previous mount if called twice
@@ -576,6 +622,13 @@ export function init() {
     const blocks = layout
         ? Array.from(layout.querySelectorAll(".about_block"))
         : [];
+
+    log("init: dom", {
+        hasSection: Boolean(section),
+        hasLayout: Boolean(layout),
+        hasTitle: Boolean(title),
+        blocks: blocks.length
+    });
 
     if (!section || !layout || !title || !blocks.length) {
         warn("init: missing DOM");
@@ -591,7 +644,9 @@ export function init() {
     sectionEl = section;
     titleEl = title;
 
+    const tPools = now();
     pools = buildPools();
+    log("init: pools built", { ms: dur(tPools), people: pools.people.length, places: pools.places.length });
     if (!pools.people.length && !pools.places.length) {
         warn("init: no pools");
         return;
@@ -608,6 +663,8 @@ export function init() {
     )
         .toLowerCase()
         .trim();
+
+    log("init: theme pick", { domKey: domKey || null, buttons: buttons.length });
 
     if (domKey && pools[domKey]?.length) {
         theme = domKey;
@@ -627,8 +684,12 @@ export function init() {
     isBusy = true;
 
     // preload everything we’re about to show
+    const tInitPre = now();
     Promise.allSettled(initialSrcs.map(preload))
         .then(async () => {
+            log("init: preload done", { ms: dur(tInitPre), count: initialSrcs.length });
+
+            const tBuild = now();
             blocks.forEach((block, i) => {
                 const src = initialSrcs[i % initialSrcs.length];
                 const { item, img } = makeItem(src);
@@ -637,16 +698,21 @@ export function init() {
                 block.appendChild(item);
                 slots.push({ block, item, img, src });
             });
+            log("init: built slots", { ms: dur(tBuild), slots: slots.length });
 
             applyThemeClasses(theme);
             syncTitleActive(theme);
 
             const items = slots.map((s) => s.item);
+            const tAnim = now();
             await animateListIn(items);
+            log("init: animate in done", { ms: dur(tAnim), count: items.length });
         })
         .catch((err) => warn("init error", err))
         .finally(() => {
             isBusy = false;
+
+            log("init: complete", { ms: dur(t0), theme, slots: slots.length });
 
             // If user clicked a theme during the initial animation, respect it.
             if (queuedTheme && queuedTheme !== theme) {
