@@ -27,8 +27,8 @@ export function init() {
     if (!sections.length) return;
 
     // Extra translateY over full scroll range
-    const BACK_DELTA_PX = 125;
-    const FRONT_DELTA_PX = 50;
+    const BACK_DELTA_PX = 150;
+    const FRONT_DELTA_PX = 75;
 
     const SPRING_CONFIG = {
         stiffness: 100,

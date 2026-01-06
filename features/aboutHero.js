@@ -84,7 +84,7 @@ export function destroy() {
 
     // clear DOM we created
     slots.forEach((s) => s.item?.remove());
-    
+
     // also reset any styles we applied to blocks
     slots.forEach((s) => {
         if (s.block) {
@@ -702,7 +702,7 @@ export function init() {
                 Array.from(block.querySelectorAll(".about_block-item")).forEach(
                     (stale) => stale.remove()
                 );
-                
+
                 const src = initialSrcs[i % initialSrcs.length];
                 const { item, img } = makeItem(src);
                 setDropPose(item);

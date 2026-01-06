@@ -44,8 +44,7 @@ function handleSuccessPage() {
     const el = document.querySelector('.section_success .title-m')
     if (!el) return
 
-    const base = el.textContent.trim().replace(/\.*$/, '')
-    el.innerHTML = `${base}, <i>${name}</i>.`
+    el.textContent = `Thank you for your message. We'll get back to you as soon as we can, ${name}.`
 }
 
 export function init() {

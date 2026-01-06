@@ -116,6 +116,11 @@ const featureList = [
         when: () => has(".section_team"),
     },
     {
+        name: "ambientSound",
+        load: () => import("./features/ambientSound.js"),
+        when: () => has(".about_sound"),
+    },
+    {
         name: "expertTabs",
         load: () => import("./features/expertTabs.js"),
         when: () => has(".section_expert"),
