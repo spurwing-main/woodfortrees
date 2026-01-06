@@ -41,12 +41,16 @@ const CONFIG = {
 
     staggerStep: 0.06,
     autoDelayMin: 500,
-    autoDelayMax: 2000
+    autoDelayMax: 2000,
+
+    warmConcurrency: 4
 };
 
 // ===== shared state =====
 
 let imageCache; // Map<string, Promise<void>>
+let poolWarmers = new Map(); // Map<string, Promise<void>>
+let readyCache; // Map<string, Promise<boolean>>
 
 let pools = { people: [], places: [] }; // string[]
 // `theme` = currently *selected* theme (including in-flight transitions)
@@ -121,6 +125,111 @@ const shuffle = (arr) => {
 
 const nextPaint = () =>
     new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+
+function ensureSrcReady(src) {
+    if (!src) return Promise.resolve(false);
+
+    let p = readyCache.get(src);
+    if (p) return p;
+
+    p = new Promise((resolve, reject) => {
+        const img = new Image();
+        img.decoding = "async";
+        img.loading = "eager";
+        img.onload = async () => {
+            if (typeof img.decode === "function") {
+                try {
+                    await img.decode();
+                } catch (err) {
+                    warn("ensureSrcReady decode failed", { src, err });
+                }
+            }
+            resolve(true);
+        };
+        img.onerror = () => reject(new Error("Image failed: " + src));
+        img.src = src;
+    });
+
+    readyCache.set(src, p);
+    p.catch(() => {
+        try {
+            readyCache.delete(src);
+        } catch { }
+    });
+
+    return p;
+}
+
+function warmPool(key) {
+    const pool = pools[key];
+    if (!pool || !pool.length) return;
+
+    const existing = poolWarmers.get(key);
+    if (existing) return existing;
+
+    const srcs = dedupe(pool);
+    const { warmConcurrency } = CONFIG;
+
+    const job = (async () => {
+        for (let i = 0; i < srcs.length; i += warmConcurrency) {
+            const batch = srcs.slice(i, i + warmConcurrency);
+            await Promise.allSettled(batch.map(ensureSrcReady));
+        }
+        log("warmPool done", { key, count: srcs.length });
+    })()
+        .catch((err) => warn("warmPool error", { key, err }))
+        .finally(() => {
+            poolWarmers.delete(key);
+        });
+
+    poolWarmers.set(key, job);
+    return job;
+}
+
+async function ensureImageReady(img, src) {
+    if (!img || !src) return false;
+
+    const t0 = now();
+
+    const ready = await ensureSrcReady(src).catch((err) => {
+        warn("ensureImageReady preload failed", { src, err });
+        return false;
+    });
+
+    const waitForLoad = () =>
+        new Promise((resolve, reject) => {
+            if (img.complete) {
+                if (img.naturalWidth > 0) {
+                    resolve(true);
+                } else {
+                    reject(new Error("Image failed: " + src));
+                }
+                return;
+            }
+
+            const onLoad = () => {
+                img.removeEventListener("error", onError);
+                resolve(true);
+            };
+            const onError = () => {
+                img.removeEventListener("load", onLoad);
+                reject(new Error("Image failed: " + src));
+            };
+
+            img.addEventListener("load", onLoad, { once: true });
+            img.addEventListener("error", onError, { once: true });
+        });
+
+    const loadResult = await waitForLoad().catch((err) => {
+        warn("ensureImageReady load failed", { src, err });
+        return false;
+    });
+
+    if (ready && loadResult) {
+        log("ensureImageReady done", { src, ms: dur(t0) });
+    }
+    return Boolean(ready && loadResult);
+}
 
 function preload(src) {
     if (!src) return Promise.reject(new Error("empty src"));
@@ -435,8 +544,8 @@ async function runAutoSwap() {
         log("auto: preload done", { ms: dur(tPre), src: nextSrc });
 
         const tSwap = now();
-        await swapSlotImage(slot, nextSrc);
-        log("auto: swap done", { ms: dur(tSwap), slotIndex });
+        const swapped = await swapSlotImage(slot, nextSrc);
+        log("auto: swap done", { ms: dur(tSwap), slotIndex, swapped });
     } catch (err) {
         warn("auto swap error", err);
     } finally {
@@ -463,6 +572,13 @@ async function swapSlotImage(slot, nextSrc) {
     const { item: newItem, img: newImg } = makeItem(nextSrc);
     setDropPose(newItem);
     slot.block.appendChild(newItem);
+
+    const ready = await ensureImageReady(newImg, nextSrc);
+    if (!ready) {
+        newItem.remove();
+        log("swapSlotImage: new image not ready", { src: nextSrc });
+        return false;
+    }
 
     // KISS: schedule OUT + IN as a single sequence.
     // IN starts at CONFIG.offsets.singleIn seconds.
@@ -498,6 +614,7 @@ async function swapSlotImage(slot, nextSrc) {
     slot.item = newItem;
     slot.img = newImg;
     slot.src = nextSrc;
+    return true;
 }
 
 // ===== theme change (global list animation) =====
@@ -510,6 +627,8 @@ async function changeTheme(key) {
         return;
     }
     if (!sectionEl || !titleEl) return;
+
+    warmPool(key);
 
     // If an animation is in-flight, just remember the latest requested theme.
     if (isBusy) {
@@ -564,6 +683,7 @@ async function changeTheme(key) {
 
         const oldItems = [];
         const newItems = [];
+        const readyPromises = [];
 
         // build new items but don't remove old yet
         const tBuild = now();
@@ -575,12 +695,21 @@ async function changeTheme(key) {
 
             oldItems.push(slot.item);
             newItems.push(item);
+            readyPromises.push(ensureImageReady(img, src));
 
             slot.item = item;
             slot.img = img;
             slot.src = src;
         });
         log("changeTheme: built new items", { ms: dur(tBuild), count: slots.length });
+
+        const readyResults = await Promise.allSettled(readyPromises);
+        const readyOk = readyResults.filter((r) => r.status === "fulfilled" && r.value).length;
+        if (readyOk !== readyResults.length) {
+            warn("changeTheme: some images not ready", { ok: readyOk, total: readyResults.length });
+        } else {
+            log("changeTheme: images ready", { count: readyOk });
+        }
 
         // Global OUT + IN triggered at the same time:
         // - OUT: scale+fade with stagger
@@ -611,6 +740,9 @@ async function changeTheme(key) {
         } else {
             scheduleAuto();
         }
+
+        const otherKey = key === "people" ? "places" : "people";
+        warmPool(otherKey);
     }
 }
 
@@ -647,6 +779,11 @@ export function init() {
             window.aboutHeroImageCache || new Map();
         imageCache = window.aboutHeroImageCache;
     }
+    if (!readyCache) {
+        window.aboutHeroReadyCache =
+            window.aboutHeroReadyCache || new Map();
+        readyCache = window.aboutHeroReadyCache;
+    }
 
     sectionEl = section;
     titleEl = title;
@@ -658,6 +795,9 @@ export function init() {
         warn("init: no pools");
         return;
     }
+
+    warmPool("people");
+    warmPool("places");
 
     // initial theme from DOM or fallbacks
     const buttons = Array.from(
@@ -712,6 +852,16 @@ export function init() {
             });
             log("init: built slots", { ms: dur(tBuild), slots: slots.length });
 
+            const readyResults = await Promise.allSettled(
+                slots.map((s) => ensureImageReady(s.img, s.src))
+            );
+            const readyOk = readyResults.filter((r) => r.status === "fulfilled" && r.value).length;
+            if (readyOk !== readyResults.length) {
+                warn("init: some images not ready", { ok: readyOk, total: readyResults.length });
+            } else {
+                log("init: images ready", { count: readyOk });
+            }
+
             applyThemeClasses(theme);
             syncTitleActive(theme);
 
@@ -751,8 +901,19 @@ export function init() {
             changeTheme(key);
         };
 
+        const onEnter = () => {
+            const key = (btn.dataset.aboutHero || "")
+                .toLowerCase()
+                .trim();
+            if (key) {
+                warmPool(key);
+            }
+        };
+
         btn.addEventListener("click", onClick);
+        btn.addEventListener("pointerenter", onEnter);
         cleanupFns.push(() => btn.removeEventListener("click", onClick));
+        cleanupFns.push(() => btn.removeEventListener("pointerenter", onEnter));
     });
 
     log("init wired, theme =", theme);

@@ -4,7 +4,7 @@ const { log, warn } = createLogger("ambientSound");
 
 const CONFIG = {
     fadeInSec: 1.2,
-    fadeOutSec: 0.9,
+    fadeOutSec: 1.0,
     crossfadeSec: 1.0,
     targetVol: 1.0,
 };
@@ -17,21 +17,7 @@ const STYLE_ID = "sitekit-ambient-sound";
 let instance = null;
 let lottieReady = null;
 
-function clamp01(n) {
-    return Math.max(0, Math.min(1, n));
-}
-
-function ensureStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = [
-        ".about_sound:focus-visible{outline:2px solid currentColor;outline-offset:4px;}",
-        ".about_sound:focus-within{outline:2px solid currentColor;outline-offset:4px;}"
-    ].join("");
-    document.head.appendChild(style);
-}
+const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
 function loadLottie() {
     if (window.lottie) return Promise.resolve(window.lottie);
@@ -61,16 +47,14 @@ function initOne(root) {
 
     const animEl = root.querySelector("[data-audio-target]");
     const textEl = root.querySelector("[data-audio-text]");
-    const lottieUrl = root.getAttribute("data-lottie-url");
-    const defaultUrl = root.getAttribute("data-audio-url");
-    const url2 = root.getAttribute("data-audio-url-2");
-    const label = root.getAttribute("data-audio-label") || "Toggle sound";
+    const lottieUrl = root.dataset.lottieUrl || root.getAttribute("data-lottie-url");
+    const defaultUrl = root.dataset.audioUrl || root.getAttribute("data-audio-url");
+    const url2 = root.dataset.audioUrl2 || root.getAttribute("data-audio-url-2");
+    const label = root.dataset.audioLabel || root.getAttribute("data-audio-label") || "Toggle sound";
 
     if (!defaultUrl) return;
 
     log("init", { defaultUrl, hasAlt: Boolean(url2), hasLottie: Boolean(lottieUrl) });
-
-    ensureStyles();
 
     root.style.cursor = "pointer";
     root.style.touchAction = "manipulation";
@@ -86,28 +70,25 @@ function initOne(root) {
     }
 
     const ctx = new AudioCtx();
-    const master = ctx.createGain();
-    master.gain.value = 1;
-    master.connect(ctx.destination);
-
     const slotGain = [ctx.createGain(), ctx.createGain()];
-    slotGain[0].gain.value = 0;
-    slotGain[1].gain.value = 0;
-    slotGain[0].connect(master);
-    slotGain[1].connect(master);
+    slotGain.forEach((g) => {
+        g.gain.value = 0;
+        g.connect(ctx.destination);
+    });
 
     let lottieAnim = null;
     let sources = [null, null];
-    let buffers = new Map();
+    const buffers = new Map();
     let activeSlot = 0;
     let isOn = false;
     let desiredOn = false;
     let autoplayFailed = false;
     let triggerPrimedUsed = false;
+    let hasPlayed = false;
     let currentUrl = null;
-    let nextUrl = url2 || defaultUrl;
     let pendingAutoplay = false;
     let wasOnBeforeHide = false;
+    let wasOnOffscreen = false;
     let cleanupFns = [];
     let timers = new Set();
     let startPromise = null;
@@ -177,7 +158,13 @@ function initOne(root) {
         sources[slot] = null;
     }
 
+    function clearTimers() {
+        timers.forEach((t) => clearTimeout(t));
+        timers.clear();
+    }
+
     function playInSlot(slot, buffer) {
+        clearTimers();
         stopSlot(slot);
         const src = ctx.createBufferSource();
         src.buffer = buffer;
@@ -246,6 +233,7 @@ function initOne(root) {
 
             isOn = true;
             desiredOn = true;
+            autoplayFailed = false;
             setUILabel();
 
             let buffer;
@@ -260,6 +248,7 @@ function initOne(root) {
 
             pendingAutoplay = false;
             playInSlot(activeSlot, buffer);
+            hasPlayed = true;
 
             fadeGain(slotGain[activeSlot], CONFIG.targetVol, fadeSec);
             fadeGain(slotGain[1 - activeSlot], 0, 0.05);
@@ -275,9 +264,9 @@ function initOne(root) {
         }
     }
 
-    function turnOff({ fadeSec = CONFIG.fadeOutSec } = {}) {
+    function turnOff({ fadeSec = CONFIG.fadeOutSec, keepDesired = false } = {}) {
         isOn = false;
-        desiredOn = false;
+        if (!keepDesired) desiredOn = false;
         setUILabel();
 
         fadeGain(slotGain[0], 0, fadeSec);
@@ -285,18 +274,17 @@ function initOne(root) {
         lottieOff();
         log("turnOff", { fadeSec });
 
-        const stopAfterMs = Math.ceil(fadeSec * 1000) + 50;
-        const timer = setTimeout(() => {
-            timers.delete(timer);
-            stopSlot(0);
-            stopSlot(1);
-        }, stopAfterMs);
-        timers.add(timer);
+        clearTimers();
+        stopSlot(0);
+        stopSlot(1);
     }
 
     async function crossfadeTo(url, { sec = CONFIG.crossfadeSec } = {}) {
         currentUrl = url;
-        if (!isOn) return;
+        if (!isOn) {
+            turnOn({ intent: true, fadeSec: sec });
+            return;
+        }
         log("crossfade:start", { url, sec });
 
         const ok = await ensureAudioRunning();
@@ -311,17 +299,10 @@ function initOne(root) {
             return;
         }
 
+        clearTimers();
         playInSlot(nextSlot, buffer);
         fadeGain(slotGain[nextSlot], CONFIG.targetVol, sec);
         fadeGain(slotGain[activeSlot], 0, sec);
-
-        const stopAfterMs = Math.ceil(sec * 1000) + 50;
-        const oldSlot = activeSlot;
-        const timer = setTimeout(() => {
-            timers.delete(timer);
-            stopSlot(oldSlot);
-        }, stopAfterMs);
-        timers.add(timer);
 
         activeSlot = nextSlot;
         log("crossfade:done", { activeSlot });
@@ -334,9 +315,8 @@ function initOne(root) {
         }
 
         if (url2) {
-            currentUrl = nextUrl || defaultUrl;
-            nextUrl = currentUrl === defaultUrl ? url2 : defaultUrl;
-            log("toggle:switch-url", { currentUrl, nextUrl });
+            currentUrl = currentUrl === defaultUrl ? url2 : defaultUrl;
+            log("toggle:switch-url", { currentUrl });
         } else {
             currentUrl = defaultUrl;
         }
@@ -360,17 +340,16 @@ function initOne(root) {
         if (!targetUrl) return;
         log("trigger:click", { trigger: val, targetUrl, isTrusted, isOn, desiredOn });
         currentUrl = targetUrl;
-        nextUrl = targetUrl === defaultUrl ? url2 || defaultUrl : defaultUrl;
+        const canPrime =
+            autoplayFailed && !hasPlayed && !triggerPrimedUsed && (!isOn || pendingAutoplay);
 
-        if (autoplayFailed && !triggerPrimedUsed) {
+        if (canPrime) {
             triggerPrimedUsed = true;
             desiredOn = true;
             setUILabel();
             log("trigger:prime-once", { trigger: val, targetUrl });
-            if (!isOn) {
-                turnOn({ intent: true });
-                return;
-            }
+            turnOn({ intent: true });
+            return;
         }
 
         if (isOn) {
@@ -387,9 +366,9 @@ function initOne(root) {
     function onVisibilityChange() {
         if (document.hidden) {
             wasOnBeforeHide = isOn;
-            if (isOn) turnOff({ fadeSec: 0.35 });
+            if (isOn) turnOff({ fadeSec: CONFIG.crossfadeSec, keepDesired: true });
         } else if (wasOnBeforeHide) {
-            turnOn({ fadeSec: 0.5 });
+            turnOn({ fadeSec: CONFIG.crossfadeSec });
         }
     }
 
@@ -397,9 +376,30 @@ function initOne(root) {
     root.addEventListener("keydown", onKeydown);
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    cleanupFns.push(() => root.removeEventListener("click", onClick));
-    cleanupFns.push(() => root.removeEventListener("keydown", onKeydown));
-    cleanupFns.push(() => document.removeEventListener("visibilitychange", onVisibilityChange));
+    cleanupFns.push(
+        () => root.removeEventListener("click", onClick),
+        () => root.removeEventListener("keydown", onKeydown),
+        () => document.removeEventListener("visibilitychange", onVisibilityChange)
+    );
+
+    const observer = new IntersectionObserver(
+        (entries) => {
+            const entry = entries[0];
+            if (!entry) return;
+            if (entry.isIntersecting) {
+                if (wasOnOffscreen) {
+                    wasOnOffscreen = false;
+                    turnOn({ fadeSec: CONFIG.crossfadeSec });
+                }
+            } else if (isOn) {
+                wasOnOffscreen = true;
+                turnOff({ fadeSec: CONFIG.crossfadeSec, keepDesired: true });
+            }
+        },
+        { threshold: 0.05 }
+    );
+    observer.observe(root);
+    cleanupFns.push(() => observer.disconnect());
 
     const triggerEls = Array.from(document.querySelectorAll("[data-audio-trigger]"));
     triggerEls.forEach((el) => el.addEventListener("click", onTriggerClick));
@@ -411,9 +411,9 @@ function initOne(root) {
     lottieOff();
 
     currentUrl = defaultUrl;
-    nextUrl = url2 || defaultUrl;
-    log("preload:start", { urls: [defaultUrl, url2].filter(Boolean) });
-    Promise.all([defaultUrl, url2].filter(Boolean).map((url) => loadBuffer(url)))
+    const preloadUrls = [defaultUrl, url2].filter(Boolean);
+    log("preload:start", { urls: preloadUrls });
+    Promise.all(preloadUrls.map((url) => loadBuffer(url)))
         .then(() => log("preload:done"))
         .catch((err) => warn("preload:failed", err));
 
@@ -458,7 +458,7 @@ function initOne(root) {
 }
 
 export function init() {
-    const root = document.querySelector(".about_sound");
+    const root = document.querySelector("[data-audio-url]");
     if (root) initOne(root);
 }
 

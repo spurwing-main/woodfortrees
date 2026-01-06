@@ -118,7 +118,7 @@ const featureList = [
     {
         name: "ambientSound",
         load: () => import("./features/ambientSound.js"),
-        when: () => has(".about_sound"),
+        when: () => has("[data-audio-url]"),
     },
     {
         name: "expertTabs",
