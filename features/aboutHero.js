@@ -46,6 +46,23 @@ const CONFIG = {
     warmConcurrency: 4
 };
 
+// Fixed anchor positions for stronger x/y variance between swaps.
+// Width/height kept modest so anchors can spread across the block without clipping.
+const ITEM_SIZE = "64%";
+const ANCHORS = [
+    { top: 4, left: 4 },
+    { top: 4, left: 20 },
+    { top: 4, left: 36 },
+    { top: 20, left: 4 },
+    { top: 20, left: 36 },
+    { top: 36, left: 4 },
+    { top: 36, left: 20 },
+    { top: 36, left: 36 },
+    { top: 20, left: 20 }
+];
+
+let allBlocks = [];
+
 // ===== shared state =====
 
 let imageCache; // Map<string, Promise<void>>
@@ -55,7 +72,7 @@ let readyCache; // Map<string, Promise<boolean>>
 let pools = { people: [], places: [] }; // string[]
 // `theme` = currently *selected* theme (including in-flight transitions)
 let theme = "people";
-let slots = []; // [{ block, item, img, src }]
+let slots = []; // [{ block, item, img, src, anchorIdx }]
 
 let autoTimer = null;
 let isBusy = false;      // any swap / theme transition in-flight
@@ -93,9 +110,17 @@ export function destroy() {
     slots.forEach((s) => {
         if (s.block) {
             s.block.style.position = "";
+            s.block.style.display = "";
+        }
+    });
+    allBlocks.forEach((block) => {
+        if (block && block.style) {
+            block.style.position = "";
+            block.style.display = "";
         }
     });
     slots = [];
+    allBlocks = [];
 
     // reset state
     isBusy = false;
@@ -108,7 +133,6 @@ export function destroy() {
 // ===== utilities =====
 
 const rand = (min, max) => min + Math.random() * (max - min);
-const randPercent = () => (Math.random() * 10).toFixed(2) + "%";
 
 const dedupe = (arr) => Array.from(new Set(arr.filter(Boolean)));
 
@@ -297,17 +321,43 @@ function pickSrcs(pool, count) {
     return out;
 }
 
+function pickAnchor(prevIdx = -1) {
+    if (!ANCHORS.length) {
+        return { top: 0, left: 0, idx: 0 };
+    }
+
+    const usable =
+        ANCHORS.length > 1
+            ? ANCHORS.map((_, i) => i).filter((i) => i !== prevIdx)
+            : [0];
+
+    const idx = usable[(Math.random() * usable.length) | 0];
+    const { top, left } = ANCHORS[idx] || { top: 0, left: 0 };
+    return { top, left, idx };
+}
+
+function describeAnchor(idx) {
+    const { top = 0, left = 0 } = ANCHORS[idx] || {};
+    return { idx: typeof idx === "number" ? idx : null, top, left };
+}
+
+function formatAnchor(idx) {
+    const a = describeAnchor(idx);
+    return `#${a.idx ?? "?"} (top:${a.top}%, left:${a.left}%)`;
+}
+
 // ===== DOM helpers =====
 
-function makeItem(src) {
+function makeItem(src, anchor) {
     // New item every time we show an image → new random x/y per swap
+    const chosenAnchor = anchor || pickAnchor();
     const item = document.createElement("div");
     item.className = "about_block-item";
     item.style.position = "absolute";
-    item.style.width = "90%";
-    item.style.height = "90%";
-    item.style.top = randPercent();
-    item.style.left = randPercent();
+    item.style.width = ITEM_SIZE;
+    item.style.height = ITEM_SIZE;
+    item.style.top = `${chosenAnchor.top}%`;
+    item.style.left = `${chosenAnchor.left}%`;
     item.style.willChange = "transform, opacity";
 
     const frame = document.createElement("div");
@@ -324,7 +374,7 @@ function makeItem(src) {
     frame.appendChild(img);
     item.appendChild(frame);
 
-    return { item, img };
+    return { item, img, anchorIdx: chosenAnchor.idx };
 }
 
 function applyThemeClasses(key) {
@@ -544,7 +594,7 @@ async function runAutoSwap() {
         log("auto: preload done", { ms: dur(tPre), src: nextSrc });
 
         const tSwap = now();
-        const swapped = await swapSlotImage(slot, nextSrc);
+        const swapped = await swapSlotImage(slot, nextSrc, slotIndex);
         log("auto: swap done", { ms: dur(tSwap), slotIndex, swapped });
     } catch (err) {
         warn("auto swap error", err);
@@ -565,11 +615,15 @@ async function runAutoSwap() {
     }
 }
 
-async function swapSlotImage(slot, nextSrc) {
+async function swapSlotImage(slot, nextSrc, slotIndexHint) {
     const t0 = now();
     const oldItem = slot.item;
 
-    const { item: newItem, img: newImg } = makeItem(nextSrc);
+    const prevAnchorIdx = slot.anchorIdx;
+    const { item: newItem, img: newImg, anchorIdx } = makeItem(
+        nextSrc,
+        pickAnchor(prevAnchorIdx)
+    );
     setDropPose(newItem);
     slot.block.appendChild(newItem);
 
@@ -609,11 +663,23 @@ async function swapSlotImage(slot, nextSrc) {
     await seq.finished.catch(() => { });
 
     log("swapSlotImage: animations done", { ms: dur(t0) });
+    const slotIndex =
+        typeof slotIndexHint === "number" ? slotIndexHint : slots.indexOf(slot);
+    log(
+        "swapSlotImage: anchor",
+        `slot ${slotIndex}: ${formatAnchor(prevAnchorIdx)} -> ${formatAnchor(anchorIdx)}`,
+        {
+            slotIndex,
+            from: describeAnchor(prevAnchorIdx),
+            to: describeAnchor(anchorIdx)
+        }
+    );
 
     oldItem.remove();
     slot.item = newItem;
     slot.img = newImg;
     slot.src = nextSrc;
+    slot.anchorIdx = anchorIdx;
     return true;
 }
 
@@ -684,12 +750,17 @@ async function changeTheme(key) {
         const oldItems = [];
         const newItems = [];
         const readyPromises = [];
+        const anchorTransitions = [];
 
         // build new items but don't remove old yet
         const tBuild = now();
         slots.forEach((slot, i) => {
             const src = newSrcs[i % newSrcs.length];
-            const { item, img } = makeItem(src);
+            const prevAnchorIdx = slot.anchorIdx;
+            const { item, img, anchorIdx } = makeItem(
+                src,
+                pickAnchor(prevAnchorIdx)
+            );
             setDropPose(item);
             slot.block.appendChild(item);
 
@@ -700,8 +771,20 @@ async function changeTheme(key) {
             slot.item = item;
             slot.img = img;
             slot.src = src;
+            slot.anchorIdx = anchorIdx;
+            anchorTransitions.push({
+                slotIndex: i,
+                from: describeAnchor(prevAnchorIdx),
+                to: describeAnchor(anchorIdx),
+                src,
+                text: `slot ${i}: ${formatAnchor(prevAnchorIdx)} -> ${formatAnchor(anchorIdx)}`
+            });
         });
         log("changeTheme: built new items", { ms: dur(tBuild), count: slots.length });
+        log("changeTheme: anchors", {
+            transitions: anchorTransitions,
+            text: anchorTransitions.map((t) => t.text)
+        });
 
         const readyResults = await Promise.allSettled(readyPromises);
         const readyOk = readyResults.filter((r) => r.status === "fulfilled" && r.value).length;
@@ -761,6 +844,8 @@ export function init() {
     const blocks = layout
         ? Array.from(layout.querySelectorAll(".about_block"))
         : [];
+
+    allBlocks = blocks;
 
     log("init: dom", {
         hasSection: Boolean(section),
@@ -844,13 +929,26 @@ export function init() {
                 );
 
                 const src = initialSrcs[i % initialSrcs.length];
-                const { item, img } = makeItem(src);
+                const anchor = pickAnchor();
+                const { item, img, anchorIdx } = makeItem(src, anchor);
                 setDropPose(item);
                 block.style.position = "relative";
                 block.appendChild(item);
-                slots.push({ block, item, img, src });
+                slots.push({ block, item, img, src, anchorIdx });
             });
             log("init: built slots", { ms: dur(tBuild), slots: slots.length });
+            log("init: anchors", {
+                slots: slots.map((s, i) => ({
+                    slotIndex: i,
+                    anchor: describeAnchor(s.anchorIdx),
+                    src: s.src,
+                    text: `slot ${i}: ${formatAnchor(s.anchorIdx)}`
+                }))
+            });
+            log(
+                "init: anchors text",
+                slots.map((s, i) => `slot ${i}: ${formatAnchor(s.anchorIdx)}`)
+            );
 
             const readyResults = await Promise.allSettled(
                 slots.map((s) => ensureImageReady(s.img, s.src))
