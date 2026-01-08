@@ -74,8 +74,6 @@ let allBlocks = [];
 
 // ===== shared state =====
 
-let imageCache; // Map<string, Promise<void>>
-let poolWarmers = new Map(); // Map<string, Promise<void>>
 let readyCache; // Map<string, Promise<boolean>>
 
 let pools = { people: [], places: [] }; // string[]
@@ -116,15 +114,10 @@ export function destroy() {
     slots.forEach((s) => s.item?.remove());
 
     // also reset any styles we applied to blocks
-    slots.forEach((s) => {
-        if (s.block) {
-            s.block.style.position = "";
-            s.block.style.display = "";
-            s.block.style.padding = "";
-            s.block.style.boxSizing = "";
-        }
-    });
-    allBlocks.forEach((block) => {
+    const blocksToReset = allBlocks.length
+        ? allBlocks
+        : slots.map((s) => s.block).filter(Boolean);
+    blocksToReset.forEach((block) => {
         if (block && block.style) {
             block.style.position = "";
             block.style.display = "";
@@ -224,32 +217,6 @@ function ensureSrcReady(src) {
     return p;
 }
 
-function warmPool(key) {
-    const pool = pools[key];
-    if (!pool || !pool.length) return;
-
-    const existing = poolWarmers.get(key);
-    if (existing) return existing;
-
-    const srcs = dedupe(pool);
-    const { warmConcurrency } = CONFIG;
-
-    const job = (async () => {
-        for (let i = 0; i < srcs.length; i += warmConcurrency) {
-            const batch = srcs.slice(i, i + warmConcurrency);
-            await Promise.allSettled(batch.map(ensureSrcReady));
-        }
-        log("warmPool done", { key, count: srcs.length });
-    })()
-        .catch((err) => warn("warmPool error", { key, err }))
-        .finally(() => {
-            poolWarmers.delete(key);
-        });
-
-    poolWarmers.set(key, job);
-    return job;
-}
-
 async function ensureImageReady(img, src) {
     if (!img || !src) return false;
 
@@ -259,15 +226,35 @@ async function ensureImageReady(img, src) {
         warn("ensureImageReady preload failed", { src, err });
         return false;
     });
+    if (!ready) return false;
+
+    if (img.src !== src) {
+        img.src = src;
+    }
+
+    const isLoaded = () => img.complete && img.naturalWidth > 0;
+
+    if (isLoaded()) {
+        log("ensureImageReady done", { src, ms: dur(t0) });
+        return true;
+    }
+
+    if (typeof img.decode === "function") {
+        try {
+            await img.decode();
+            if (isLoaded()) {
+                log("ensureImageReady done", { src, ms: dur(t0) });
+                return true;
+            }
+        } catch (err) {
+            warn("ensureImageReady decode failed", { src, err });
+        }
+    }
 
     const waitForLoad = () =>
         new Promise((resolve, reject) => {
-            if (img.complete) {
-                if (img.naturalWidth > 0) {
-                    resolve(true);
-                } else {
-                    reject(new Error("Image failed: " + src));
-                }
+            if (isLoaded()) {
+                resolve(true);
                 return;
             }
 
@@ -289,42 +276,10 @@ async function ensureImageReady(img, src) {
         return false;
     });
 
-    if (ready && loadResult) {
+    if (loadResult) {
         log("ensureImageReady done", { src, ms: dur(t0) });
     }
-    return Boolean(ready && loadResult);
-}
-
-function preload(src) {
-    if (!src) return Promise.reject(new Error("empty src"));
-    let p = imageCache.get(src);
-    if (p) {
-        log("preload cache hit", src);
-        return p;
-    }
-
-    log("preload start", src);
-    p = new Promise((resolve, reject) => {
-        const img = new Image();
-        img.decoding = "async";
-        img.loading = "eager";
-        img.onload = () => {
-            log("preload loaded", src);
-            resolve();
-        };
-        img.onerror = () => {
-            warn("preload failed", src);
-            reject(new Error("Image failed: " + src));
-        };
-        img.src = src;
-    });
-    imageCache.set(src, p);
-    p.catch(() => {
-        try {
-            imageCache.delete(src);
-        } catch { }
-    });
-    return p;
+    return Boolean(loadResult);
 }
 
 function buildPools() {
@@ -415,33 +370,6 @@ function pickAnchor(prevAnchor = null) {
     return { ...anchor, idx: target.idx };
 }
 
-function describeAnchor(anchor, layout) {
-    if (anchor && typeof anchor === "object") {
-        const { idx, topPercent, leftPercent, x = 0, y = 0 } = anchor;
-        if (typeof topPercent === "number" && typeof leftPercent === "number") {
-            return { idx: typeof idx === "number" ? idx : null, top: topPercent, left: leftPercent };
-        }
-        const l = layout || computeBlockLayout();
-        return {
-            idx: typeof idx === "number" ? idx : null,
-            top: l.height ? (y * l.maxY * 100) / l.height : 0,
-            left: l.width ? (x * l.maxX * 100) / l.width : 0
-        };
-    }
-    const target = typeof anchor === "number" ? ANCHORS[anchor] : null;
-    return {
-        idx: typeof anchor === "number" ? anchor : null,
-        top: target ? target.y * 100 : 0,
-        left: target ? target.x * 100 : 0
-    };
-}
-
-function formatAnchor(anchor, layout) {
-    const a = describeAnchor(anchor, layout);
-    const round = (v) => Math.round(v * 10) / 10;
-    return `#${a.idx ?? "?"} (top:${round(a.top)}%, left:${round(a.left)}%)`;
-}
-
 function setObjectPosition(img, anchor) {
     if (!img || !anchor) return;
     const x = clamp((anchor.x ?? 0.5) * 100, 0, 100);
@@ -515,43 +443,6 @@ function setDropPose(el) {
     const { dropInY, dropInScale, dropRot } = CONFIG;
     el.style.opacity = "0";
     el.style.transform = `translate3d(0, ${dropInY}px, 0) scale(${dropInScale}) rotate(${dropRot}deg)`;
-}
-
-// single-card (auto swap): in = full drop pose
-function animateInSingle(el, delay = 0) {
-    const { dropInY, dropInScale, dropRot, springs, durations } =
-        CONFIG;
-    return animate(
-        el,
-        {
-            opacity: [0, 1],
-            y: [dropInY, 0],
-            scale: [dropInScale, 1],
-            rotate: [dropRot, 0]
-        },
-        {
-            ...springs.in,
-            duration: durations.singleIn,
-            delay
-        }
-    );
-}
-
-// single-card (auto swap): out = quick scale down + fade, no x/y/rotate
-function animateOutSingle(el, delay = 0) {
-    const { springs, durations } = CONFIG;
-    return animate(
-        el,
-        {
-            opacity: [1, 0],
-            scale: [1, 0.9]
-        },
-        {
-            ...springs.in,
-            duration: durations.singleOut,
-            delay
-        }
-    );
 }
 
 // list animations (initial load + theme switch)
@@ -677,10 +568,7 @@ async function runAutoSwap() {
     }
 
     const used = new Set(slots.map((s) => s.src));
-    let candidates = pool.filter((src) => src !== slot.src && !used.has(src));
-    if (!candidates.length) {
-        candidates = pool.filter((src) => src !== slot.src);
-    }
+    const candidates = pool.filter((src) => src !== slot.src && !used.has(src));
     if (!candidates.length) {
         scheduleAuto();
         return;
@@ -703,7 +591,7 @@ async function runAutoSwap() {
     try {
         // load-aware single swap
         const tPre = now();
-        await preload(nextSrc);
+        await ensureSrcReady(nextSrc);
         log("auto: preload done", { ms: dur(tPre), src: nextSrc });
 
         const tSwap = now();
@@ -778,17 +666,6 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
     await seq.finished.catch(() => { });
 
     log("swapSlotImage: animations done", { ms: dur(t0) });
-    const slotIndex =
-        typeof slotIndexHint === "number" ? slotIndexHint : slots.indexOf(slot);
-    log(
-        "swapSlotImage: anchor",
-        `slot ${slotIndex}: ${formatAnchor(prevAnchor, blockLayout)} -> ${formatAnchor(anchor, blockLayout)}`,
-        {
-            slotIndex,
-            from: describeAnchor(prevAnchor, blockLayout),
-            to: describeAnchor(anchor, blockLayout)
-        }
-    );
 
     oldItem.remove();
     slot.item = newItem;
@@ -808,8 +685,6 @@ async function changeTheme(key) {
         return;
     }
     if (!sectionEl || !titleEl) return;
-
-    warmPool(key);
 
     // If an animation is in-flight, just remember the latest requested theme.
     if (isBusy) {
@@ -858,14 +733,13 @@ async function changeTheme(key) {
     try {
         // preload everything this theme needs for the slots
         const tPre = now();
-        const preResults = await Promise.allSettled(preloadList.map(preload));
+        const preResults = await Promise.allSettled(preloadList.map(ensureSrcReady));
         const preOk = preResults.filter((r) => r.status === "fulfilled").length;
         log("changeTheme: preload done", { ms: dur(tPre), ok: preOk, total: preResults.length });
 
         const oldItems = [];
         const newItems = [];
         const readyPromises = [];
-        const anchorTransitions = [];
 
         // build new items but don't remove old yet
         const tBuild = now();
@@ -889,19 +763,8 @@ async function changeTheme(key) {
             slot.img = img;
             slot.src = src;
             slot.anchor = anchor;
-            anchorTransitions.push({
-                slotIndex: i,
-                from: describeAnchor(prevAnchor, blockLayout),
-                to: describeAnchor(anchor, blockLayout),
-                src,
-                text: `slot ${i}: ${formatAnchor(prevAnchor, blockLayout)} -> ${formatAnchor(anchor, blockLayout)}`
-            });
         });
         log("changeTheme: built new items", { ms: dur(tBuild), count: slots.length });
-        log("changeTheme: anchors", {
-            transitions: anchorTransitions,
-            text: anchorTransitions.map((t) => t.text)
-        });
 
         const readyResults = await Promise.allSettled(readyPromises);
         const readyOk = readyResults.filter((r) => r.status === "fulfilled" && r.value).length;
@@ -941,8 +804,6 @@ async function changeTheme(key) {
             scheduleAuto();
         }
 
-        const otherKey = key === "people" ? "places" : "people";
-        warmPool(otherKey);
     }
 }
 
@@ -976,11 +837,6 @@ export function init() {
         return;
     }
 
-    if (!imageCache) {
-        window.aboutHeroImageCache =
-            window.aboutHeroImageCache || new Map();
-        imageCache = window.aboutHeroImageCache;
-    }
     if (!readyCache) {
         window.aboutHeroReadyCache =
             window.aboutHeroReadyCache || new Map();
@@ -997,9 +853,6 @@ export function init() {
         warn("init: no pools");
         return;
     }
-
-    warmPool("people");
-    warmPool("places");
 
     // initial theme from DOM or fallbacks
     const buttons = Array.from(
@@ -1034,7 +887,7 @@ export function init() {
 
     // preload everything we’re about to show
     const tInitPre = now();
-    Promise.allSettled(initialSrcs.map(preload))
+    Promise.allSettled(initialSrcs.map(ensureSrcReady))
         .then(async () => {
             log("init: preload done", { ms: dur(tInitPre), count: initialSrcs.length });
 
@@ -1058,18 +911,6 @@ export function init() {
                 slots.push({ block, item, img, src, anchor: chosenAnchor });
             });
             log("init: built slots", { ms: dur(tBuild), slots: slots.length });
-            log("init: anchors", {
-                slots: slots.map((s, i) => ({
-                    slotIndex: i,
-                    anchor: describeAnchor(s.anchor, computeBlockLayout(s.block)),
-                    src: s.src,
-                    text: `slot ${i}: ${formatAnchor(s.anchor, computeBlockLayout(s.block))}`
-                }))
-            });
-            log(
-                "init: anchors text",
-                slots.map((s, i) => `slot ${i}: ${formatAnchor(s.anchor, computeBlockLayout(s.block))}`)
-            );
 
             const readyResults = await Promise.allSettled(
                 slots.map((s) => ensureImageReady(s.img, s.src))
@@ -1120,19 +961,8 @@ export function init() {
             changeTheme(key);
         };
 
-        const onEnter = () => {
-            const key = (btn.dataset.aboutHero || "")
-                .toLowerCase()
-                .trim();
-            if (key) {
-                warmPool(key);
-            }
-        };
-
         btn.addEventListener("click", onClick);
-        btn.addEventListener("pointerenter", onEnter);
         cleanupFns.push(() => btn.removeEventListener("click", onClick));
-        cleanupFns.push(() => btn.removeEventListener("pointerenter", onEnter));
     });
 
     log("init wired, theme =", theme);
