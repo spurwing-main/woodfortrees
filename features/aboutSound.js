@@ -61,8 +61,11 @@ function initOne(root) {
     let activeSlot = 0;
 
     // ---- state ----
-    let isOn = false;        // "intended + currently playing/fading"
-    let desiredOn = false;   // UI intent (for immediate UI)
+    let isOn = false;        // sources started (audio keeps playing)
+    let desiredOn = false;   // UI intent (audible vs muted)
+    let hasEverStarted = false;
+    let autoTriggerUsed = false;
+    let ignoreNextInputChange = false;
     let currentUrl = defaultUrl;
 
     let primed = false;
@@ -252,7 +255,10 @@ function initOne(root) {
 
         if (!ctx || !gains) return;
 
-        if (isOn && sources[activeSlot]) return;
+        if (isOn && sources[activeSlot]) {
+            fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
+            return;
+        }
 
         startPromise = (async () => {
             const ok = await ensureAudioRunning();
@@ -278,6 +284,7 @@ function initOne(root) {
             }
 
             playInSlot(activeSlot, buffer);
+            hasEverStarted = true;
 
             fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
             fadeGain(gains[1 - activeSlot], 0, 0.05);
@@ -296,7 +303,6 @@ function initOne(root) {
         setUILabel();
 
         if (!ctx || !gains) {
-            isOn = false;
             stopSlotNow(0);
             stopSlotNow(1);
             return;
@@ -305,19 +311,13 @@ function initOne(root) {
         // fade first
         fadeGain(gains[0], 0, fadeSec);
         fadeGain(gains[1], 0, fadeSec);
-
-        // then stop after fade (this was your missing piece)
-        scheduleStopSlot(0, fadeSec);
-        scheduleStopSlot(1, fadeSec);
-
-        isOn = false;
     }
 
     async function crossfadeTo(url, { sec = CONFIG.crossfadeSec } = {}) {
         currentUrl = url;
 
         // Triggers must not start playback
-        if (!isOn || !ctx || !gains) return;
+        if (!desiredOn || !isOn || !ctx || !gains) return;
 
         const ok = await ensureAudioRunning();
         if (!ok) return;
@@ -363,6 +363,7 @@ function initOne(root) {
         // Only toggle when clicking the root (not the checkbox itself)
         if (e.target === toggleInput) return;
 
+        ignoreNextInputChange = true;
         toggleSound();
     }
 
@@ -375,6 +376,12 @@ function initOne(root) {
     function onToggleChange() {
         // This path is only for direct checkbox interactions (SR/keyboard focus on input).
         primeAudioOnce();
+
+        if (ignoreNextInputChange) {
+            ignoreNextInputChange = false;
+            setUILabel();
+            return;
+        }
 
         const muted = Boolean(toggleInput?.checked); // checked = muted
         if (muted) {
@@ -393,7 +400,7 @@ function initOne(root) {
         if (!targetUrl) return;
 
         currentUrl = targetUrl;
-        if (isOn) crossfadeTo(targetUrl);
+        if (desiredOn && isOn) crossfadeTo(targetUrl);
     }
 
     function onVisibilityChange() {
@@ -458,6 +465,31 @@ function initOne(root) {
     for (const el of triggerEls) el.addEventListener("click", onTriggerClick);
     cleanupFns.push(() => {
         for (const el of triggerEls) el.removeEventListener("click", onTriggerClick);
+    });
+
+    function getAutoTriggerUrl() {
+        const el = triggerEls[0];
+        if (!el) return null;
+        const val = String(el.getAttribute("data-audio-trigger") || "");
+        return val === "2" ? altUrl : defaultUrl;
+    }
+
+    function tryAutoStartFromTrigger(eventTarget) {
+        if (root.contains(eventTarget)) return;
+        if (autoTriggerUsed || hasEverStarted || desiredOn || isOn) return;
+        autoTriggerUsed = true;
+        const url = getAutoTriggerUrl();
+        if (!url) return;
+        currentUrl = url;
+        turnOn();
+    }
+
+    const autoTriggerHandler = (e) => tryAutoStartFromTrigger(e.target);
+    document.addEventListener("pointerdown", autoTriggerHandler, { passive: true, once: true });
+    document.addEventListener("keydown", autoTriggerHandler, { passive: true, once: true });
+    cleanupFns.push(() => {
+        document.removeEventListener("pointerdown", autoTriggerHandler);
+        document.removeEventListener("keydown", autoTriggerHandler);
     });
 
     // init
