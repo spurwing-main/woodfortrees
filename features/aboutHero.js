@@ -46,20 +46,29 @@ const CONFIG = {
     warmConcurrency: 4
 };
 
-// Fixed anchor positions for stronger x/y variance between swaps.
-// Width/height kept modest so anchors can spread across the block without clipping.
-const ITEM_SIZE = "64%";
-const ANCHORS = [
-    { top: 4, left: 4 },
-    { top: 4, left: 20 },
-    { top: 4, left: 36 },
-    { top: 20, left: 4 },
-    { top: 20, left: 36 },
-    { top: 36, left: 4 },
-    { top: 36, left: 20 },
-    { top: 36, left: 36 },
-    { top: 20, left: 20 }
-];
+const LAYOUT = {
+    // Card size as % of the block's smaller side (recommended 40–80).
+    // Larger values reduce travel area; smaller values give more movement.
+    itemSizePercentOfMin: 85,
+    // Jitter per swap/theme change as % of movement range (recommended 0–15).
+    // Higher = more variation away from the base anchor.
+    anchorJitterPercent: 15,
+    // Anchor grid positions (normalized 0–1). With [0, 1] we only use corners.
+    anchorSteps: [0, 1]
+};
+
+const ANCHORS = buildAnchors();
+
+function buildAnchors() {
+    const anchors = [];
+    LAYOUT.anchorSteps.forEach((y) => {
+        LAYOUT.anchorSteps.forEach((x) => {
+            anchors.push({ x, y });
+        });
+    });
+
+    return anchors.map((anchor, idx) => ({ ...anchor, idx }));
+}
 
 let allBlocks = [];
 
@@ -72,7 +81,7 @@ let readyCache; // Map<string, Promise<boolean>>
 let pools = { people: [], places: [] }; // string[]
 // `theme` = currently *selected* theme (including in-flight transitions)
 let theme = "people";
-let slots = []; // [{ block, item, img, src, anchorIdx }]
+let slots = []; // [{ block, item, img, src, anchor }]
 
 let autoTimer = null;
 let isBusy = false;      // any swap / theme transition in-flight
@@ -111,12 +120,16 @@ export function destroy() {
         if (s.block) {
             s.block.style.position = "";
             s.block.style.display = "";
+            s.block.style.padding = "";
+            s.block.style.boxSizing = "";
         }
     });
     allBlocks.forEach((block) => {
         if (block && block.style) {
             block.style.position = "";
             block.style.display = "";
+            block.style.padding = "";
+            block.style.boxSizing = "";
         }
     });
     slots = [];
@@ -134,7 +147,34 @@ export function destroy() {
 
 const rand = (min, max) => min + Math.random() * (max - min);
 
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
 const dedupe = (arr) => Array.from(new Set(arr.filter(Boolean)));
+
+const anchorSide = (v) => (v >= 0.5 ? 1 : 0);
+
+function computeBlockLayout(block) {
+    const rect = block?.getBoundingClientRect
+        ? block.getBoundingClientRect()
+        : { width: 0, height: 0 };
+
+    const width = rect.width || 0;
+    const height = rect.height || 0;
+    const base = Math.max(Math.min(width, height), 0);
+    const size = (base * LAYOUT.itemSizePercentOfMin) / 100;
+    const sizeWidthPercent = width ? (size / width) * 100 : 0;
+    const sizeHeightPercent = height ? (size / height) * 100 : 0;
+
+    return {
+        width,
+        height,
+        size,
+        sizeWidthPercent,
+        sizeHeightPercent,
+        maxX: Math.max(0, width - size),
+        maxY: Math.max(0, height - size)
+    };
+}
 
 const shuffle = (arr) => {
     const a = arr.slice();
@@ -321,60 +361,133 @@ function pickSrcs(pool, count) {
     return out;
 }
 
-function pickAnchor(prevIdx = -1) {
+function jitterAnchor(anchor) {
+    if (!anchor) return { idx: null, x: 0, y: 0 };
+
+    const jitterScale = (LAYOUT.anchorJitterPercent || 0) / 100;
+    if (!jitterScale) return { ...anchor };
+
+    const jitteredX = clamp(anchor.x + rand(-jitterScale, jitterScale), 0, 1);
+    const jitteredY = clamp(anchor.y + rand(-jitterScale, jitterScale), 0, 1);
+
+    return { ...anchor, x: jitteredX, y: jitteredY };
+}
+
+function resolveAnchorPosition(anchor, blockLayout) {
+    const layout = blockLayout || computeBlockLayout();
+    const jittered = jitterAnchor(anchor);
+    const left = jittered.x * layout.maxX;
+    const top = jittered.y * layout.maxY;
+    const topPercent = layout.height ? (top / layout.height) * 100 : 0;
+    const leftPercent = layout.width ? (left / layout.width) * 100 : 0;
+
+    return { ...jittered, top, left, topPercent, leftPercent };
+}
+
+function pickAnchor(prevAnchor = null) {
     if (!ANCHORS.length) {
-        return { top: 0, left: 0, idx: 0 };
+        return { x: 0, y: 0, idx: 0 };
     }
 
-    const usable =
-        ANCHORS.length > 1
-            ? ANCHORS.map((_, i) => i).filter((i) => i !== prevIdx)
-            : [0];
+    const randomAnchor = () => {
+        const idx = (Math.random() * ANCHORS.length) | 0;
+        const base = ANCHORS[idx] || { x: 0, y: 0, idx };
+        const anchor = jitterAnchor(base);
+        return { ...anchor, idx: base.idx ?? idx };
+    };
 
-    const idx = usable[(Math.random() * usable.length) | 0];
-    const { top, left } = ANCHORS[idx] || { top: 0, left: 0 };
-    return { top, left, idx };
+    if (!prevAnchor || typeof prevAnchor !== "object") {
+        return randomAnchor();
+    }
+
+    const prevX = anchorSide(prevAnchor.x ?? 0);
+    const prevY = anchorSide(prevAnchor.y ?? 0);
+    const targetX = prevX === 0 ? 1 : 0;
+    const targetY = prevY === 0 ? 1 : 0;
+
+    const target =
+        ANCHORS.find((a) => a.x === targetX && a.y === targetY) || null;
+    if (!target) {
+        return randomAnchor();
+    }
+
+    const anchor = jitterAnchor(target);
+    return { ...anchor, idx: target.idx };
 }
 
-function describeAnchor(idx) {
-    const { top = 0, left = 0 } = ANCHORS[idx] || {};
-    return { idx: typeof idx === "number" ? idx : null, top, left };
+function describeAnchor(anchor, layout) {
+    if (anchor && typeof anchor === "object") {
+        const { idx, topPercent, leftPercent, x = 0, y = 0 } = anchor;
+        if (typeof topPercent === "number" && typeof leftPercent === "number") {
+            return { idx: typeof idx === "number" ? idx : null, top: topPercent, left: leftPercent };
+        }
+        const l = layout || computeBlockLayout();
+        return {
+            idx: typeof idx === "number" ? idx : null,
+            top: l.height ? (y * l.maxY * 100) / l.height : 0,
+            left: l.width ? (x * l.maxX * 100) / l.width : 0
+        };
+    }
+    const target = typeof anchor === "number" ? ANCHORS[anchor] : null;
+    return {
+        idx: typeof anchor === "number" ? anchor : null,
+        top: target ? target.y * 100 : 0,
+        left: target ? target.x * 100 : 0
+    };
 }
 
-function formatAnchor(idx) {
-    const a = describeAnchor(idx);
-    return `#${a.idx ?? "?"} (top:${a.top}%, left:${a.left}%)`;
+function formatAnchor(anchor, layout) {
+    const a = describeAnchor(anchor, layout);
+    const round = (v) => Math.round(v * 10) / 10;
+    return `#${a.idx ?? "?"} (top:${round(a.top)}%, left:${round(a.left)}%)`;
+}
+
+function setObjectPosition(img, anchor) {
+    if (!img || !anchor) return;
+    const x = clamp((anchor.x ?? 0.5) * 100, 0, 100);
+    const y = clamp((anchor.y ?? 0.5) * 100, 0, 100);
+    img.style.objectPosition = `${x}% ${y}%`;
 }
 
 // ===== DOM helpers =====
 
-function makeItem(src, anchor) {
+function makeItem(src, anchor, blockLayout) {
     // New item every time we show an image → new random x/y per swap
-    const chosenAnchor = anchor || pickAnchor();
+    const layout = blockLayout || computeBlockLayout();
+    const baseAnchor = anchor || pickAnchor();
+    const resolvedAnchor = resolveAnchorPosition(baseAnchor, layout);
+
     const item = document.createElement("div");
     item.className = "about_block-item";
     item.style.position = "absolute";
-    item.style.width = ITEM_SIZE;
-    item.style.height = ITEM_SIZE;
-    item.style.top = `${chosenAnchor.top}%`;
-    item.style.left = `${chosenAnchor.left}%`;
+    item.style.width = `${layout.sizeWidthPercent || 0}%`;
+    item.style.height = `${layout.sizeHeightPercent || 0}%`;
+    item.style.top = `${resolvedAnchor.topPercent || 0}%`;
+    item.style.left = `${resolvedAnchor.leftPercent || 0}%`;
     item.style.willChange = "transform, opacity";
 
     const frame = document.createElement("div");
     frame.className = "about_block-inner";
     frame.style.width = "100%";
     frame.style.height = "100%";
+    frame.style.display = "grid";
+    frame.style.placeItems = "center";
+    frame.style.overflow = "hidden";
 
     const img = document.createElement("img");
     img.className = "about_block-img";
     img.alt = "";
     img.decoding = "async";
     img.src = src;
+    img.style.width = "100%";
+    img.style.height = "100%";
+    img.style.display = "block";
+    setObjectPosition(img, resolvedAnchor);
 
     frame.appendChild(img);
     item.appendChild(frame);
 
-    return { item, img, anchorIdx: chosenAnchor.idx };
+    return { item, img, anchor: resolvedAnchor };
 }
 
 function applyThemeClasses(key) {
@@ -619,10 +732,12 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
     const t0 = now();
     const oldItem = slot.item;
 
-    const prevAnchorIdx = slot.anchorIdx;
-    const { item: newItem, img: newImg, anchorIdx } = makeItem(
+    const prevAnchor = slot.anchor;
+    const blockLayout = computeBlockLayout(slot.block);
+    const { item: newItem, img: newImg, anchor } = makeItem(
         nextSrc,
-        pickAnchor(prevAnchorIdx)
+        pickAnchor(prevAnchor),
+        blockLayout
     );
     setDropPose(newItem);
     slot.block.appendChild(newItem);
@@ -667,11 +782,11 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
         typeof slotIndexHint === "number" ? slotIndexHint : slots.indexOf(slot);
     log(
         "swapSlotImage: anchor",
-        `slot ${slotIndex}: ${formatAnchor(prevAnchorIdx)} -> ${formatAnchor(anchorIdx)}`,
+        `slot ${slotIndex}: ${formatAnchor(prevAnchor, blockLayout)} -> ${formatAnchor(anchor, blockLayout)}`,
         {
             slotIndex,
-            from: describeAnchor(prevAnchorIdx),
-            to: describeAnchor(anchorIdx)
+            from: describeAnchor(prevAnchor, blockLayout),
+            to: describeAnchor(anchor, blockLayout)
         }
     );
 
@@ -679,7 +794,7 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
     slot.item = newItem;
     slot.img = newImg;
     slot.src = nextSrc;
-    slot.anchorIdx = anchorIdx;
+    slot.anchor = anchor;
     return true;
 }
 
@@ -756,10 +871,12 @@ async function changeTheme(key) {
         const tBuild = now();
         slots.forEach((slot, i) => {
             const src = newSrcs[i % newSrcs.length];
-            const prevAnchorIdx = slot.anchorIdx;
-            const { item, img, anchorIdx } = makeItem(
+            const prevAnchor = slot.anchor;
+            const blockLayout = computeBlockLayout(slot.block);
+            const { item, img, anchor } = makeItem(
                 src,
-                pickAnchor(prevAnchorIdx)
+                pickAnchor(prevAnchor),
+                blockLayout
             );
             setDropPose(item);
             slot.block.appendChild(item);
@@ -771,13 +888,13 @@ async function changeTheme(key) {
             slot.item = item;
             slot.img = img;
             slot.src = src;
-            slot.anchorIdx = anchorIdx;
+            slot.anchor = anchor;
             anchorTransitions.push({
                 slotIndex: i,
-                from: describeAnchor(prevAnchorIdx),
-                to: describeAnchor(anchorIdx),
+                from: describeAnchor(prevAnchor, blockLayout),
+                to: describeAnchor(anchor, blockLayout),
                 src,
-                text: `slot ${i}: ${formatAnchor(prevAnchorIdx)} -> ${formatAnchor(anchorIdx)}`
+                text: `slot ${i}: ${formatAnchor(prevAnchor, blockLayout)} -> ${formatAnchor(anchor, blockLayout)}`
             });
         });
         log("changeTheme: built new items", { ms: dur(tBuild), count: slots.length });
@@ -930,24 +1047,28 @@ export function init() {
 
                 const src = initialSrcs[i % initialSrcs.length];
                 const anchor = pickAnchor();
-                const { item, img, anchorIdx } = makeItem(src, anchor);
+                const { item, img, anchor: chosenAnchor } = makeItem(
+                    src,
+                    anchor,
+                    computeBlockLayout(block)
+                );
                 setDropPose(item);
                 block.style.position = "relative";
                 block.appendChild(item);
-                slots.push({ block, item, img, src, anchorIdx });
+                slots.push({ block, item, img, src, anchor: chosenAnchor });
             });
             log("init: built slots", { ms: dur(tBuild), slots: slots.length });
             log("init: anchors", {
                 slots: slots.map((s, i) => ({
                     slotIndex: i,
-                    anchor: describeAnchor(s.anchorIdx),
+                    anchor: describeAnchor(s.anchor, computeBlockLayout(s.block)),
                     src: s.src,
-                    text: `slot ${i}: ${formatAnchor(s.anchorIdx)}`
+                    text: `slot ${i}: ${formatAnchor(s.anchor, computeBlockLayout(s.block))}`
                 }))
             });
             log(
                 "init: anchors text",
-                slots.map((s, i) => `slot ${i}: ${formatAnchor(s.anchorIdx)}`)
+                slots.map((s, i) => `slot ${i}: ${formatAnchor(s.anchor, computeBlockLayout(s.block))}`)
             );
 
             const readyResults = await Promise.allSettled(

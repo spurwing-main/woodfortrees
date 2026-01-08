@@ -7,6 +7,9 @@ const CONFIG = {
     fadeOutSec: 0.6,
     crossfadeSec: 1.5,
     targetVol: 1.0,
+    // Global multiplier applied to `targetVol`.
+    // Set to 0.8 to reduce volume by 20%.
+    volumeMultiplier: 0.6,
 };
 
 let instance = null;
@@ -24,6 +27,15 @@ function initOne(root) {
     const altUrl = root.dataset.audioUrl2 || root.getAttribute("data-audio-url-2");
     const label =
         root.dataset.audioLabel || root.getAttribute("data-audio-label") || "Toggle sound";
+
+    // Optional per-instance override: <... data-audio-volume-multiplier="0.8">
+    const volumeMulAttr =
+        root.dataset.audioVolumeMultiplier || root.getAttribute("data-audio-volume-multiplier");
+    const volumeMulNum = volumeMulAttr == null ? NaN : Number(volumeMulAttr);
+    const volumeMultiplier = Number.isFinite(volumeMulNum)
+        ? clamp01(volumeMulNum)
+        : CONFIG.volumeMultiplier;
+    const effectiveTargetVol = clamp01(CONFIG.targetVol * volumeMultiplier);
 
     if (!defaultUrl) return;
 
@@ -267,7 +279,7 @@ function initOne(root) {
 
             playInSlot(activeSlot, buffer);
 
-            fadeGain(gains[activeSlot], CONFIG.targetVol, fadeSec);
+            fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
             fadeGain(gains[1 - activeSlot], 0, 0.05);
         })();
 
@@ -322,7 +334,7 @@ function initOne(root) {
 
         playInSlot(nextSlot, buffer);
 
-        fadeGain(gains[nextSlot], CONFIG.targetVol, sec);
+        fadeGain(gains[nextSlot], effectiveTargetVol, sec);
         fadeGain(gains[activeSlot], 0, sec);
 
         // stop old slot after fade
