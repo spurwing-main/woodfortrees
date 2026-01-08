@@ -4,10 +4,11 @@ const { log, warn } = createLogger("ambientSound");
 
 const CONFIG = {
     fadeInSec: 1.8,
-    fadeOutSec: 1.5,
+    fadeOutSec: 0.6,
     crossfadeSec: 1.5,
     targetVol: 1.0,
 };
+
 let instance = null;
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
@@ -18,13 +19,13 @@ function initOne(root) {
     const toggleInput = root.querySelector("input[type='checkbox']");
     const textOnEls = Array.from(root.querySelectorAll('[data-audio-text="on"]'));
     const textOffEls = Array.from(root.querySelectorAll('[data-audio-text="off"]'));
+
     const defaultUrl = root.dataset.audioUrl || root.getAttribute("data-audio-url");
-    const url2 = root.dataset.audioUrl2 || root.getAttribute("data-audio-url-2");
-    const label = root.dataset.audioLabel || root.getAttribute("data-audio-label") || "Toggle sound";
+    const altUrl = root.dataset.audioUrl2 || root.getAttribute("data-audio-url-2");
+    const label =
+        root.dataset.audioLabel || root.getAttribute("data-audio-label") || "Toggle sound";
 
     if (!defaultUrl) return;
-
-    log("init", { defaultUrl, hasAlt: Boolean(url2) });
 
     root.style.cursor = "pointer";
     root.style.touchAction = "manipulation";
@@ -39,184 +40,235 @@ function initOne(root) {
         return;
     }
 
-    const ctx = new AudioCtx();
-    const slotGain = [ctx.createGain(), ctx.createGain()];
-    slotGain.forEach((g) => {
-        g.gain.value = 0;
-        g.connect(ctx.destination);
-    });
+    // ---- audio (lazy init) ----
+    let ctx = null;
+    let gains = null; // [GainNode, GainNode]
+    let sources = [null, null]; // [AudioBufferSourceNode|null, ...]
+    const buffers = new Map(); // url -> Promise<AudioBuffer>
 
-    let sources = [null, null];
-    const buffers = new Map();
     let activeSlot = 0;
-    let isOn = false;
-    let desiredOn = false;
-    let autoplayFailed = false;
-    let triggerPrimedUsed = false;
-    let hasPlayed = false;
-    let currentUrl = null;
-    let pendingAutoplay = false;
+
+    // ---- state ----
+    let isOn = false;        // "intended + currently playing/fading"
+    let desiredOn = false;   // UI intent (for immediate UI)
+    let currentUrl = defaultUrl;
+
+    let primed = false;
+    let preloadStarted = false;
+
     let wasOnBeforeHide = false;
     let wasOnOffscreen = false;
-    let cleanupFns = [];
-    let timers = new Set();
-    let startPromise = null;
 
+    let startPromise = null;
+    const cleanupFns = [];
+
+    // ---------- UI ----------
     function setUILabel() {
-        const soundOn = isOn;
-        root.setAttribute("aria-pressed", soundOn ? "true" : "false");
-        if (toggleInput) {
-            toggleInput.checked = !soundOn;
-        }
-        const onOpacity = soundOn ? 1 : 0;
-        const offOpacity = soundOn ? 0 : 1;
-        textOnEls.forEach((el) => {
+        // Drive UI off intent so it updates instantly on click
+        const uiOn = desiredOn;
+
+        root.setAttribute("aria-pressed", uiOn ? "true" : "false");
+
+        // checked === muted (CSS uses :checked to show muted bars)
+        if (toggleInput) toggleInput.checked = !uiOn;
+
+        const onOpacity = uiOn ? 1 : 0;
+        const offOpacity = uiOn ? 0 : 1;
+
+        for (const el of textOnEls) {
             el.style.opacity = onOpacity;
-            el.style.transition = el.style.transition || "opacity 0.35s ease";
+            el.style.transition ||= "opacity 0.35s ease";
             el.textContent = "SOUND ON";
-            el.setAttribute("aria-hidden", soundOn ? "false" : "true");
-        });
-        textOffEls.forEach((el) => {
+            el.setAttribute("aria-hidden", uiOn ? "false" : "true");
+        }
+
+        for (const el of textOffEls) {
             el.style.opacity = offOpacity;
-            el.style.transition = el.style.transition || "opacity 0.35s ease";
+            el.style.transition ||= "opacity 0.35s ease";
             el.textContent = "SOUND OFF";
-            el.setAttribute("aria-hidden", soundOn ? "true" : "false");
-        });
+            el.setAttribute("aria-hidden", uiOn ? "true" : "false");
+        }
+    }
+
+    // ---------- audio graph ----------
+    function initAudioGraph() {
+        if (ctx) return;
+        ctx = new AudioCtx();
+        gains = [ctx.createGain(), ctx.createGain()];
+        for (const g of gains) {
+            g.gain.value = 0;
+            g.connect(ctx.destination);
+        }
+    }
+
+    // Must be synchronous in a user gesture
+    function unlockAudioFromGesture() {
+        if (!ctx) return;
+        try {
+            const buf = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start(0);
+            src.stop(0);
+        } catch { }
+    }
+
+    function primeAudioOnce() {
+        if (primed) return;
+        primed = true;
+
+        initAudioGraph();
+        try { ctx.resume(); } catch { }
+
+        unlockAudioFromGesture();
+        startPreload();
     }
 
     function fadeGain(gainNode, to, sec) {
+        if (!ctx || !gainNode) return;
+
         const now = ctx.currentTime;
         const g = gainNode.gain;
+
         if (typeof g.cancelAndHoldAtTime === "function") {
             g.cancelAndHoldAtTime(now);
         } else {
             g.cancelScheduledValues(now);
             g.setValueAtTime(g.value, now);
         }
+
         g.linearRampToValueAtTime(clamp01(to), now + Math.max(0.001, sec));
     }
 
-    async function loadBuffer(url) {
-        if (buffers.has(url)) {
-            log("buffer:cache-hit", { url });
-            return buffers.get(url);
+    async function ensureAudioRunning() {
+        if (!ctx) return false;
+        if (ctx.state === "running") return true;
+
+        try {
+            await ctx.resume();
+        } catch (e) {
+            log("audio:resume-blocked", { state: ctx.state, err: String(e) });
+            return false;
         }
-        log("buffer:load-start", { url });
+
+        return ctx.state === "running";
+    }
+
+    async function loadBuffer(url) {
+        if (!ctx) throw new Error("Audio context not initialized");
+        if (buffers.has(url)) return buffers.get(url);
+
         const p = fetch(url, { mode: "cors" })
             .then((r) => {
                 if (!r.ok) throw new Error(`Fetch failed (${r.status}) for ${url}`);
                 return r.arrayBuffer();
             })
-            .then((ab) => ctx.decodeAudioData(ab))
-            .then((decoded) => {
-                log("buffer:loaded", { url });
-                return decoded;
-            });
+            .then((ab) =>
+                ctx.decodeAudioData(ab).catch((e) => {
+                    warn("decodeAudioData failed", { url, err: String(e) });
+                    throw e;
+                })
+            );
+
         buffers.set(url, p);
         return p;
     }
 
-    function stopSlot(slot) {
+    function startPreload() {
+        if (preloadStarted || !ctx) return;
+        const urls = [defaultUrl, altUrl].filter(Boolean);
+        if (!urls.length) return;
+
+        preloadStarted = true;
+        Promise.all(urls.map(loadBuffer)).catch((err) => warn("preload:failed", err));
+    }
+
+    function stopSlotNow(slot) {
         const s = sources[slot];
         if (!s) return;
-        try {
-            s.stop(0);
-        } catch { }
-        try {
-            s.disconnect();
-        } catch { }
+        try { s.stop(0); } catch { }
+        try { s.disconnect(); } catch { }
         sources[slot] = null;
     }
 
-    function clearTimers() {
-        timers.forEach((t) => clearTimeout(t));
-        timers.clear();
+    function scheduleStopSlot(slot, sec) {
+        const s = sources[slot];
+        if (!s || !ctx) return;
+
+        const stopAt = ctx.currentTime + Math.max(0.05, sec) + 0.02;
+
+        // Ensure cleanup even if stop throws
+        const cleanup = () => {
+            try { s.disconnect(); } catch { }
+            if (sources[slot] === s) sources[slot] = null;
+        };
+
+        try {
+            s.onended = cleanup;
+            s.stop(stopAt);
+        } catch {
+            // fallback: immediate cleanup
+            cleanup();
+        }
     }
 
     function playInSlot(slot, buffer) {
-        clearTimers();
-        stopSlot(slot);
+        if (!ctx || !gains) return;
+
+        // hard-stop anything already in this slot
+        stopSlotNow(slot);
+
         const src = ctx.createBufferSource();
         src.buffer = buffer;
         src.loop = true;
-        src.connect(slotGain[slot]);
+        src.connect(gains[slot]);
         src.start(0);
+
         sources[slot] = src;
-        log("play:start", { slot, url: currentUrl });
     }
 
-    async function ensureAudioRunning() {
-        if (ctx.state === "running") return true;
-        const timeoutMs = 400;
-        const resumePromise = ctx.resume().then(
-            () => "resumed",
-            () => "failed"
-        );
-        const result = await Promise.race([
-            resumePromise,
-            new Promise((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
-        ]);
-
-        if (result !== "resumed" || ctx.state !== "running") {
-            log("audio:resume-blocked", { result, state: ctx.state });
-            return false;
-        }
-
-        log("audio:resume-ok", { state: ctx.state });
-        return true;
-    }
-
-    async function turnOn({ fadeSec = CONFIG.fadeInSec, intent = true } = {}) {
+    // ---------- controls ----------
+    async function turnOn({ fadeSec = CONFIG.fadeInSec } = {}) {
         if (startPromise) return startPromise;
-        if (isOn && sources[activeSlot]) {
-            log("turnOn:already-playing", { currentUrl, activeSlot });
-            return;
-        }
+
+        primeAudioOnce();
+
+        // immediate UI intent
+        desiredOn = true;
+        setUILabel();
+
+        if (!ctx || !gains) return;
+
+        if (isOn && sources[activeSlot]) return;
+
         startPromise = (async () => {
-            log("turnOn:start", { currentUrl, fadeSec });
-            if (intent) {
-                desiredOn = true;
-                setUILabel();
-            }
             const ok = await ensureAudioRunning();
             if (!ok) {
-                log("turnOn:blocked");
-                pendingAutoplay = true;
-                isOn = false;
+                // revert UI if blocked
                 desiredOn = false;
+                isOn = false;
                 setUILabel();
-                if (!intent) autoplayFailed = true;
-                if (intent) {
-                    log("turnOn:pending-autoplay", { currentUrl });
-                }
                 return;
             }
 
-            if (!currentUrl) currentUrl = defaultUrl;
-
             isOn = true;
-            desiredOn = true;
-            autoplayFailed = false;
-            setUILabel();
 
             let buffer;
             try {
-                buffer = await loadBuffer(currentUrl);
+                buffer = await loadBuffer(currentUrl || defaultUrl);
             } catch (err) {
                 warn("audio failed to load/decode", err);
+                desiredOn = false;
                 isOn = false;
                 setUILabel();
                 return;
             }
 
-            pendingAutoplay = false;
             playInSlot(activeSlot, buffer);
-            hasPlayed = true;
 
-            fadeGain(slotGain[activeSlot], CONFIG.targetVol, fadeSec);
-            fadeGain(slotGain[1 - activeSlot], 0, 0.05);
-
-            log("turnOn:playing", { currentUrl, activeSlot });
+            fadeGain(gains[activeSlot], CONFIG.targetVol, fadeSec);
+            fadeGain(gains[1 - activeSlot], 0, 0.05);
         })();
 
         try {
@@ -227,31 +279,39 @@ function initOne(root) {
     }
 
     function turnOff({ fadeSec = CONFIG.fadeOutSec, keepDesired = false } = {}) {
-        isOn = false;
-        if (!keepDesired) desiredOn = false;
+        // immediate UI intent
+        desiredOn = keepDesired ? desiredOn : false;
         setUILabel();
 
-        fadeGain(slotGain[0], 0, fadeSec);
-        fadeGain(slotGain[1], 0, fadeSec);
-        log("turnOff", { fadeSec });
+        if (!ctx || !gains) {
+            isOn = false;
+            stopSlotNow(0);
+            stopSlotNow(1);
+            return;
+        }
 
-        clearTimers();
-        stopSlot(0);
-        stopSlot(1);
+        // fade first
+        fadeGain(gains[0], 0, fadeSec);
+        fadeGain(gains[1], 0, fadeSec);
+
+        // then stop after fade (this was your missing piece)
+        scheduleStopSlot(0, fadeSec);
+        scheduleStopSlot(1, fadeSec);
+
+        isOn = false;
     }
 
     async function crossfadeTo(url, { sec = CONFIG.crossfadeSec } = {}) {
         currentUrl = url;
-        if (!isOn) {
-            turnOn({ intent: true, fadeSec: sec });
-            return;
-        }
-        log("crossfade:start", { url, sec });
+
+        // Triggers must not start playback
+        if (!isOn || !ctx || !gains) return;
 
         const ok = await ensureAudioRunning();
         if (!ok) return;
 
         const nextSlot = 1 - activeSlot;
+
         let buffer;
         try {
             buffer = await loadBuffer(url);
@@ -260,99 +320,113 @@ function initOne(root) {
             return;
         }
 
-        clearTimers();
         playInSlot(nextSlot, buffer);
-        fadeGain(slotGain[nextSlot], CONFIG.targetVol, sec);
-        fadeGain(slotGain[activeSlot], 0, sec);
+
+        fadeGain(gains[nextSlot], CONFIG.targetVol, sec);
+        fadeGain(gains[activeSlot], 0, sec);
+
+        // stop old slot after fade
+        scheduleStopSlot(activeSlot, sec);
 
         activeSlot = nextSlot;
-        log("crossfade:done", { activeSlot });
     }
 
-    function toggle() {
-        if (isOn) {
+    function toggleSound() {
+        // one click should prime + toggle
+        primeAudioOnce();
+
+        if (desiredOn) {
             turnOff();
-            return;
-        }
-
-        if (url2) {
-            currentUrl = currentUrl === defaultUrl ? url2 : defaultUrl;
-            log("toggle:switch-url", { currentUrl });
         } else {
-            currentUrl = defaultUrl;
+            turnOn();
         }
+    }
 
-        turnOn({ intent: true });
+    // ---------- events ----------
+    function onRootClick(e) {
+        // Prevent the LABEL default behavior from auto-toggling the checkbox
+        // (this is what was flipping it out of sync)
+        if (e.target !== toggleInput) e.preventDefault();
+
+        // Only toggle when clicking the root (not the checkbox itself)
+        if (e.target === toggleInput) return;
+
+        toggleSound();
+    }
+
+    function onRootKeydown(e) {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        toggleSound();
+    }
+
+    function onToggleChange() {
+        // This path is only for direct checkbox interactions (SR/keyboard focus on input).
+        primeAudioOnce();
+
+        const muted = Boolean(toggleInput?.checked); // checked = muted
+        if (muted) {
+            turnOff();
+        } else {
+            turnOn();
+        }
     }
 
     function onTriggerClick(e) {
+        // Trigger = unlock + select URL; only crossfade if already playing
+        primeAudioOnce();
+
         const val = String(e.currentTarget?.getAttribute("data-audio-trigger") || "");
-        const isTrusted = Boolean(e.isTrusted);
-        const targetUrl = val === "2" ? url2 : defaultUrl;
+        const targetUrl = val === "2" ? altUrl : defaultUrl;
         if (!targetUrl) return;
-        log("trigger:click", { trigger: val, targetUrl, isTrusted, isOn, desiredOn });
+
         currentUrl = targetUrl;
-        const canPrime =
-            autoplayFailed && !hasPlayed && !triggerPrimedUsed && (!isOn || pendingAutoplay);
-
-        if (canPrime) {
-            triggerPrimedUsed = true;
-            desiredOn = true;
-            setUILabel();
-            log("trigger:prime-once", { trigger: val, targetUrl });
-            turnOn({ intent: true });
-            return;
-        }
-
-        if (isOn) {
-            crossfadeTo(targetUrl);
-        }
+        if (isOn) crossfadeTo(targetUrl);
     }
 
     function onVisibilityChange() {
         if (document.hidden) {
             wasOnBeforeHide = isOn;
             if (isOn) turnOff({ fadeSec: CONFIG.crossfadeSec, keepDesired: true });
-        } else if (wasOnBeforeHide) {
-            turnOn({ fadeSec: CONFIG.crossfadeSec });
-        }
-    }
-
-    const onToggleChange = () => {
-        const checked = Boolean(toggleInput?.checked);
-        log("toggle:checkbox", { checked, isOn, pendingAutoplay });
-        if (checked) {
-            desiredOn = false;
-            turnOff();
             return;
         }
-        desiredOn = true;
-        turnOn({ intent: true });
-        if (pendingAutoplay) {
-            log("autoplay:retry");
-            turnOn();
-        }
-    };
 
-    if (toggleInput) {
-        toggleInput.addEventListener("change", onToggleChange);
+        if (wasOnBeforeHide) {
+            // resume only if user still wants it on
+            if (desiredOn) turnOn({ fadeSec: CONFIG.crossfadeSec });
+        }
     }
+
+    // Wire up
+    root.addEventListener("click", onRootClick);
+    root.addEventListener("keydown", onRootKeydown);
+
+    // Prime on earliest gesture (does not start sound by itself)
+    root.addEventListener("pointerdown", primeAudioOnce, { passive: true });
+    root.addEventListener("touchstart", primeAudioOnce, { passive: true });
+
+    if (toggleInput) toggleInput.addEventListener("change", onToggleChange);
 
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     cleanupFns.push(
-        () => document.removeEventListener("visibilitychange", onVisibilityChange),
-        () => toggleInput?.removeEventListener("change", onToggleChange)
+        () => root.removeEventListener("click", onRootClick),
+        () => root.removeEventListener("keydown", onRootKeydown),
+        () => root.removeEventListener("pointerdown", primeAudioOnce),
+        () => root.removeEventListener("touchstart", primeAudioOnce),
+        () => toggleInput?.removeEventListener("change", onToggleChange),
+        () => document.removeEventListener("visibilitychange", onVisibilityChange)
     );
 
     const observer = new IntersectionObserver(
         (entries) => {
             const entry = entries[0];
             if (!entry) return;
+
             if (entry.isIntersecting) {
                 if (wasOnOffscreen) {
                     wasOnOffscreen = false;
-                    turnOn({ fadeSec: CONFIG.crossfadeSec });
+                    if (desiredOn) turnOn({ fadeSec: CONFIG.crossfadeSec });
                 }
                 return;
             }
@@ -364,52 +438,57 @@ function initOne(root) {
         },
         { threshold: 0.05, rootMargin: "100% 0px 0px 0px" }
     );
+
     observer.observe(root);
     cleanupFns.push(() => observer.disconnect());
 
     const triggerEls = Array.from(document.querySelectorAll("[data-audio-trigger]"));
-    triggerEls.forEach((el) => el.addEventListener("click", onTriggerClick));
-    cleanupFns.push(() =>
-        triggerEls.forEach((el) => el.removeEventListener("click", onTriggerClick))
-    );
+    for (const el of triggerEls) el.addEventListener("click", onTriggerClick);
+    cleanupFns.push(() => {
+        for (const el of triggerEls) el.removeEventListener("click", onTriggerClick);
+    });
 
+    // init
+    desiredOn = false;
+    isOn = false;
+    currentUrl = defaultUrl;
     setUILabel();
 
-    currentUrl = defaultUrl;
-    const preloadUrls = [defaultUrl, url2].filter(Boolean);
-    log("preload:start", { urls: preloadUrls });
-    Promise.all(preloadUrls.map((url) => loadBuffer(url)))
-        .then(() => log("preload:done"))
-        .catch((err) => warn("preload:failed", err));
-
-    log("autoplay:attempt", { currentUrl });
-    turnOn({ intent: false });
-
     root.ambientSound = {
-        on: turnOn,
-        off: turnOff,
-        toggle,
-        playUrl: (url) => crossfadeTo(url),
-        playAlt: () => url2 && crossfadeTo(url2),
+        on: () => turnOn(),
+        off: () => turnOff(),
+        toggle: toggleSound,
+        playUrl: (url) => {
+            currentUrl = url;
+            if (isOn) crossfadeTo(url);
+        },
+        playAlt: () => altUrl && (currentUrl = altUrl, isOn && crossfadeTo(altUrl)),
     };
 
     const destroy = () => {
         cleanupFns.splice(0).forEach((fn) => {
-            try {
-                fn();
-            } catch { }
+            try { fn(); } catch { }
         });
-        timers.forEach((timer) => clearTimeout(timer));
-        timers.clear();
+
+        desiredOn = false;
         isOn = false;
         setUILabel();
-        fadeGain(slotGain[0], 0, 0);
-        fadeGain(slotGain[1], 0, 0);
-        stopSlot(0);
-        stopSlot(1);
-        try {
-            ctx.close();
-        } catch { }
+
+        if (gains) {
+            fadeGain(gains[0], 0, 0);
+            fadeGain(gains[1], 0, 0);
+        }
+
+        stopSlotNow(0);
+        stopSlotNow(1);
+
+        if (ctx) {
+            try { ctx.close(); } catch { }
+        }
+
+        ctx = null;
+        gains = null;
+        sources = [null, null];
     };
 
     instance = { destroy };
@@ -422,6 +501,6 @@ export function init() {
 }
 
 export function destroy() {
-    if (instance?.destroy) instance.destroy();
+    instance?.destroy?.();
     instance = null;
 }
