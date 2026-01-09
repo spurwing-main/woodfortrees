@@ -41,9 +41,7 @@ const CONFIG = {
 
     staggerStep: 0.06,
     autoDelayMin: 500,
-    autoDelayMax: 2000,
-
-    warmConcurrency: 4
+    autoDelayMax: 2000
 };
 
 const LAYOUT = {
@@ -63,13 +61,19 @@ const LAYOUT = {
     // Minimum displacement per swap, as % of the available axis range.
     swapMinDistancePercent: 14,
     // Minimum per-axis displacement per swap, as % of that axis range.
-    swapMinAxisPercent: 8,
+    swapMinAxisPercent: 10,
     // Minimum displacement along the long axis, as % of that axis range.
     swapMinLongAxisPercent: 20,
     // Keep a small padding from edges, as % of the available axis range.
     edgePaddingPercent: 1,
     // Nudge away from edges, as % of the available axis range.
-    edgeNudgePercent: 8
+    edgeNudgePercent: 8,
+    // Allow a small overscan on the Y axis, as % of the available axis range.
+    overscanYPercent: 10,
+    // Avoid horizontal lineups by enforcing a minimum Y separation.
+    lineupYMinPercent: 16,
+    // Nudge amount when too close in Y, as % of the available axis range.
+    lineupYNudgePercent: 8
 };
 
 let allBlocks = [];
@@ -361,6 +365,8 @@ function computeDriftPosition(
     const padY = Math.min(padPct, maxYRange * 0.5);
     const nudgeX = Math.min(nudgePct, maxXRange * 0.5);
     const nudgeY = Math.min(nudgePct, maxYRange * 0.5);
+    const overscanYPct = Math.max(0, LAYOUT.overscanYPercent || 0);
+    const overscanY = Math.min((overscanYPct / 100) * maxYRange, maxYRange);
     const strength = Math.max(0, LAYOUT.driftStrengthPercent || 0);
     const maxSpeed = Math.max(0, LAYOUT.driftMaxSpeedPercent || 0);
     const kick = Math.max(0, LAYOUT.driftKickPercent || 0);
@@ -380,7 +386,9 @@ function computeDriftPosition(
 
     if (!prevAnchor) {
         leftPercent = maxXRange ? r(padX, maxXRange - padX) : 0;
-        topPercent = maxYRange ? r(padY, maxYRange - padY) : 0;
+        const minY = padY - overscanY;
+        const maxY = maxYRange - padY + overscanY;
+        topPercent = maxYRange ? r(minY, maxY) : 0;
         const maxSpeedX = maxSpeed * (maxXRange / maxRange) * scaleX;
         const maxSpeedY = maxSpeed * (maxYRange / maxRange) * scaleY;
         vx = maxSpeedX ? r(-maxSpeedX, maxSpeedX) * 0.3 : 0;
@@ -449,8 +457,8 @@ function computeDriftPosition(
             vy = dir * minVy;
         }
         topPercent += vy;
-        const minY = padY;
-        const maxY = maxYRange - padY;
+        const minY = padY - overscanY;
+        const maxY = maxYRange - padY + overscanY;
         if (topPercent < minY) {
             topPercent = clamp(minY + nudgeY, minY, maxY);
             vy = Math.abs(vy) * 0.5;
@@ -567,9 +575,44 @@ function computeDriftPosition(
     return { x, y, top, left, topPercent, leftPercent, vx, vy };
 }
 
+function applyLineupAvoidanceY(anchor, layout, neighbors = []) {
+    if (!anchor || !neighbors.length) return anchor;
+
+    const maxYRange = Math.max(0, 100 - (layout.sizeHeightPercent || 0));
+    if (!maxYRange) return anchor;
+
+    const minSepPct = Math.max(0, LAYOUT.lineupYMinPercent || 0);
+    const nudgePct = Math.max(0, LAYOUT.lineupYNudgePercent || 0);
+    if (!minSepPct || !nudgePct) return anchor;
+
+    const padPct = Math.max(0, LAYOUT.edgePaddingPercent || 0);
+    const overscanYPct = Math.max(0, LAYOUT.overscanYPercent || 0);
+    const padY = Math.min(padPct, maxYRange * 0.5);
+    const overscanY = Math.min((overscanYPct / 100) * maxYRange, maxYRange);
+    const minY = padY - overscanY;
+    const maxY = maxYRange - padY + overscanY;
+    const minSep = (minSepPct / 100) * maxYRange;
+    const nudge = (nudgePct / 100) * maxYRange;
+
+    let topPercent = anchor.topPercent ?? 0;
+    neighbors.forEach((n) => {
+        if (!n) return;
+        const ny = n.topPercent ?? 0;
+        const dy = topPercent - ny;
+        if (Math.abs(dy) < minSep) {
+            const dir = dy < 0 ? -1 : 1;
+            topPercent = clamp(topPercent + dir * nudge, minY, maxY);
+        }
+    });
+
+    const top = layout.height ? (topPercent / 100) * layout.height : 0;
+    const y = layout.maxY ? top / layout.maxY : 0.5;
+    return { ...anchor, topPercent, top, y };
+}
+
 // ===== DOM helpers =====
 
-function makeItem(src, blockLayout, prevAnchor = null) {
+function makeItem(src, blockLayout, prevAnchor = null, neighbors = []) {
     // New item every time we show an image → new position per swap
     const layout = blockLayout || computeBlockLayout();
     const resolvedAnchor = computeDriftPosition(
@@ -577,14 +620,19 @@ function makeItem(src, blockLayout, prevAnchor = null) {
         prevAnchor,
         blockLayout?.driftProfile || null
     );
+    const finalAnchor = applyLineupAvoidanceY(
+        resolvedAnchor,
+        layout,
+        neighbors
+    );
 
     const item = document.createElement("div");
     item.className = "about_block-item";
     item.style.position = "absolute";
     item.style.width = `${layout.sizeWidthPercent || 0}%`;
     item.style.height = `${layout.sizeHeightPercent || 0}%`;
-    item.style.top = `${resolvedAnchor.topPercent || 0}%`;
-    item.style.left = `${resolvedAnchor.leftPercent || 0}%`;
+    item.style.top = `${finalAnchor.topPercent || 0}%`;
+    item.style.left = `${finalAnchor.leftPercent || 0}%`;
     item.style.willChange = "transform, opacity";
 
     const frame = document.createElement("div");
@@ -607,7 +655,7 @@ function makeItem(src, blockLayout, prevAnchor = null) {
     frame.appendChild(img);
     item.appendChild(frame);
 
-    return { item, img, anchor: resolvedAnchor };
+    return { item, img, anchor: finalAnchor };
 }
 
 function applyThemeClasses(key) {
@@ -814,10 +862,14 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
 
     const prevAnchor = slot.anchor;
     const blockLayout = computeBlockLayout(slot.block);
+    const neighbors = slots
+        .filter((s) => s && s !== slot && s.anchor)
+        .map((s) => s.anchor);
     const { item: newItem, img: newImg, anchor } = makeItem(
         nextSrc,
         blockLayout,
-        prevAnchor
+        prevAnchor,
+        neighbors
     );
     if (prevAnchor && anchor) {
         const round = (v) =>
@@ -957,10 +1009,14 @@ async function changeTheme(key) {
             const src = newSrcs[i % newSrcs.length];
             const prevAnchor = slot.anchor;
             const blockLayout = computeBlockLayout(slot.block);
+            const neighbors = slots
+                .filter((s) => s && s !== slot && s.anchor)
+                .map((s) => s.anchor);
             const { item, img, anchor } = makeItem(
                 src,
                 blockLayout,
-                prevAnchor
+                prevAnchor,
+                neighbors
             );
             setDropPose(item);
             slot.block.appendChild(item);
@@ -1109,10 +1165,12 @@ export function init() {
                 );
 
                 const src = initialSrcs[i % initialSrcs.length];
+                const neighbors = slots.map((s) => s.anchor);
                 const { item, img, anchor: chosenAnchor } = makeItem(
                     src,
                     computeBlockLayout(block),
-                    null
+                    null,
+                    neighbors
                 );
                 setDropPose(item);
                 block.style.position = "relative";
