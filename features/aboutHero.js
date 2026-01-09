@@ -44,36 +44,96 @@ const CONFIG = {
     autoDelayMax: 2000
 };
 
+const DEFAULT_LAYOUT_DIALS = {
+    // Ratios in 0..1, but values >1 are treated as already-percent for quick tuning.
+    size: 0.9,
+    drift: {
+        strength: 0.9,
+        maxSpeed: 0.95,
+        minMove: 0.5,
+        minMoveLongAxis: 0.5,
+        kick: 0.25
+    },
+    swap: {
+        minDistance: 0.25,
+        minAxis: 0.5,
+        minLongAxis: 0.5
+    },
+    edges: {
+        padding: 0,
+        nudge: 0,
+        overscanY: 0.25
+    },
+    lineup: {
+        minY: 0.25,
+        nudgeY: 0.25
+    }
+};
+
+const toPercent = (value, fallback) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback * 100;
+    if (n > 1.5) return Math.max(0, n);
+    return Math.max(0, n) * 100;
+};
+
+function mergeLayoutDials(overrides = {}) {
+    return {
+        ...DEFAULT_LAYOUT_DIALS,
+        ...overrides,
+        drift: {
+            ...DEFAULT_LAYOUT_DIALS.drift,
+            ...(overrides?.drift || {})
+        },
+        swap: {
+            ...DEFAULT_LAYOUT_DIALS.swap,
+            ...(overrides?.swap || {})
+        },
+        edges: {
+            ...DEFAULT_LAYOUT_DIALS.edges,
+            ...(overrides?.edges || {})
+        },
+        lineup: {
+            ...DEFAULT_LAYOUT_DIALS.lineup,
+            ...(overrides?.lineup || {})
+        }
+    };
+}
+
+const layoutDials = mergeLayoutDials(
+    typeof window !== "undefined" ? window.aboutHeroLayoutDials : null
+);
+
 const LAYOUT = {
     // Card size as % of the block's smaller side.
     // Hooked to layout changes via computeBlockLayout.
-    itemSizePercentOfMin: 85,
+    itemSizePercentOfMin: toPercent(layoutDials.size, DEFAULT_LAYOUT_DIALS.size),
     // Random-walk drift per swap, as % of the available axis range.
-    driftStrengthPercent: 80,
+    driftStrengthPercent: toPercent(layoutDials.drift.strength, DEFAULT_LAYOUT_DIALS.drift.strength),
     // Max drift speed per swap, as % of the available axis range.
-    driftMaxSpeedPercent: 95,
+    driftMaxSpeedPercent: toPercent(layoutDials.drift.maxSpeed, DEFAULT_LAYOUT_DIALS.drift.maxSpeed),
     // Minimum drift speed per swap, as % of the available axis range.
-    driftMinMovePercent: 12,
+    driftMinMovePercent: toPercent(layoutDials.drift.minMove, DEFAULT_LAYOUT_DIALS.drift.minMove),
     // Minimum drift speed per swap on the long axis, as % of that axis range.
-    minMoveLongAxisPercent: 24,
+    minMoveLongAxisPercent: toPercent(layoutDials.drift.minMoveLongAxis, DEFAULT_LAYOUT_DIALS.drift.minMoveLongAxis),
     // Random kick per swap to avoid slow/flat paths.
-    driftKickPercent: 18,
+    driftKickPercent: toPercent(layoutDials.drift.kick, DEFAULT_LAYOUT_DIALS.drift.kick),
     // Minimum displacement per swap, as % of the available axis range.
-    swapMinDistancePercent: 14,
+    swapMinDistancePercent: toPercent(layoutDials.swap.minDistance, DEFAULT_LAYOUT_DIALS.swap.minDistance),
     // Minimum per-axis displacement per swap, as % of that axis range.
-    swapMinAxisPercent: 10,
+    swapMinAxisPercent: toPercent(layoutDials.swap.minAxis, DEFAULT_LAYOUT_DIALS.swap.minAxis),
     // Minimum displacement along the long axis, as % of that axis range.
-    swapMinLongAxisPercent: 20,
+    swapMinLongAxisPercent: toPercent(layoutDials.swap.minLongAxis, DEFAULT_LAYOUT_DIALS.swap.minLongAxis),
     // Keep a small padding from edges, as % of the available axis range.
-    edgePaddingPercent: 1,
+    edgePaddingPercent: toPercent(layoutDials.edges.padding, DEFAULT_LAYOUT_DIALS.edges.padding),
     // Nudge away from edges, as % of the available axis range.
-    edgeNudgePercent: 8,
+    edgeNudgePercent: toPercent(layoutDials.edges.nudge, DEFAULT_LAYOUT_DIALS.edges.nudge),
     // Allow a small overscan on the Y axis, as % of the available axis range.
-    overscanYPercent: 10,
+    overscanYPercent: toPercent(layoutDials.edges.overscanY, DEFAULT_LAYOUT_DIALS.edges.overscanY),
     // Avoid horizontal lineups by enforcing a minimum Y separation.
-    lineupYMinPercent: 16,
+    lineupYMinPercent: toPercent(layoutDials.lineup.minY, DEFAULT_LAYOUT_DIALS.lineup.minY),
     // Nudge amount when too close in Y, as % of the available axis range.
-    lineupYNudgePercent: 8
+    lineupYNudgePercent: toPercent(layoutDials.lineup.nudgeY, DEFAULT_LAYOUT_DIALS.lineup.nudgeY)
 };
 
 let allBlocks = [];
