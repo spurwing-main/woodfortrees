@@ -47,28 +47,30 @@ const CONFIG = {
 };
 
 const LAYOUT = {
-    // Card size as % of the block's smaller side (recommended 40–80).
-    // Larger values reduce travel area; smaller values give more movement.
+    // Card size as % of the block's smaller side.
+    // Hooked to layout changes via computeBlockLayout.
     itemSizePercentOfMin: 85,
-    // Jitter per swap/theme change as % of movement range (recommended 0–15).
-    // Higher = more variation away from the base anchor.
-    anchorJitterPercent: 15,
-    // Anchor grid positions (normalized 0–1). With [0, 1] we only use corners.
-    anchorSteps: [0, 1]
+    // Random-walk drift per swap, as % of the available axis range.
+    driftStrengthPercent: 80,
+    // Max drift speed per swap, as % of the available axis range.
+    driftMaxSpeedPercent: 95,
+    // Minimum drift speed per swap, as % of the available axis range.
+    driftMinMovePercent: 12,
+    // Minimum drift speed per swap on the long axis, as % of that axis range.
+    minMoveLongAxisPercent: 24,
+    // Random kick per swap to avoid slow/flat paths.
+    driftKickPercent: 18,
+    // Minimum displacement per swap, as % of the available axis range.
+    swapMinDistancePercent: 14,
+    // Minimum per-axis displacement per swap, as % of that axis range.
+    swapMinAxisPercent: 8,
+    // Minimum displacement along the long axis, as % of that axis range.
+    swapMinLongAxisPercent: 20,
+    // Keep a small padding from edges, as % of the available axis range.
+    edgePaddingPercent: 1,
+    // Nudge away from edges, as % of the available axis range.
+    edgeNudgePercent: 8
 };
-
-const ANCHORS = buildAnchors();
-
-function buildAnchors() {
-    const anchors = [];
-    LAYOUT.anchorSteps.forEach((y) => {
-        LAYOUT.anchorSteps.forEach((x) => {
-            anchors.push({ x, y });
-        });
-    });
-
-    return anchors.map((anchor, idx) => ({ ...anchor, idx }));
-}
 
 let allBlocks = [];
 
@@ -144,7 +146,18 @@ const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const dedupe = (arr) => Array.from(new Set(arr.filter(Boolean)));
 
-const anchorSide = (v) => (v >= 0.5 ? 1 : 0);
+function randFrom(profile, min, max) {
+    if (!profile) return rand(min, max);
+    let seed = profile.seed >>> 0;
+    if (!seed) {
+        seed = (Math.random() * 0xffffffff) >>> 0;
+        profile.seed = seed;
+    }
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    profile.seed = seed;
+    const t = seed / 0xffffffff;
+    return min + t * (max - min);
+}
 
 function computeBlockLayout(block) {
     const rect = block?.getBoundingClientRect
@@ -158,6 +171,22 @@ function computeBlockLayout(block) {
     const sizeWidthPercent = width ? (size / width) * 100 : 0;
     const sizeHeightPercent = height ? (size / height) * 100 : 0;
 
+    const makeDriftProfile = () => {
+        const scale = () => rand(0.6, 1.6);
+        const bias = () => rand(-0.8, 0.8);
+        return {
+            scaleX: scale(),
+            scaleY: scale(),
+            biasX: bias(),
+            biasY: bias(),
+            seed: (Math.random() * 0xffffffff) >>> 0
+        };
+    };
+
+    const driftProfile =
+        block?.__aboutHeroDriftProfile || makeDriftProfile();
+    if (block) block.__aboutHeroDriftProfile = driftProfile;
+
     return {
         width,
         height,
@@ -165,7 +194,8 @@ function computeBlockLayout(block) {
         sizeWidthPercent,
         sizeHeightPercent,
         maxX: Math.max(0, width - size),
-        maxY: Math.max(0, height - size)
+        maxY: Math.max(0, height - size),
+        driftProfile
     };
 }
 
@@ -316,74 +346,237 @@ function pickSrcs(pool, count) {
     return out;
 }
 
-function jitterAnchor(anchor) {
-    if (!anchor) return { idx: null, x: 0, y: 0 };
+function computeDriftPosition(
+    layout,
+    prevAnchor = null,
+    driftProfile = null
+) {
+    const maxXPercent = 100 - (layout.sizeWidthPercent || 0);
+    const maxYPercent = 100 - (layout.sizeHeightPercent || 0);
+    const maxXRange = Math.max(0, maxXPercent);
+    const maxYRange = Math.max(0, maxYPercent);
+    const padPct = Math.max(0, LAYOUT.edgePaddingPercent || 0);
+    const nudgePct = Math.max(0, LAYOUT.edgeNudgePercent || 0);
+    const padX = Math.min(padPct, maxXRange * 0.5);
+    const padY = Math.min(padPct, maxYRange * 0.5);
+    const nudgeX = Math.min(nudgePct, maxXRange * 0.5);
+    const nudgeY = Math.min(nudgePct, maxYRange * 0.5);
+    const strength = Math.max(0, LAYOUT.driftStrengthPercent || 0);
+    const maxSpeed = Math.max(0, LAYOUT.driftMaxSpeedPercent || 0);
+    const kick = Math.max(0, LAYOUT.driftKickPercent || 0);
+    const profile = driftProfile || {};
+    const scaleX = Math.max(0.6, Math.min(1.6, profile.scaleX ?? 1));
+    const scaleY = Math.max(0.6, Math.min(1.6, profile.scaleY ?? 1));
+    const biasX = Math.max(-1, Math.min(1, profile.biasX ?? 0));
+    const biasY = Math.max(-1, Math.min(1, profile.biasY ?? 0));
+    const maxRange = Math.max(maxXRange, maxYRange) || 1;
+    const damping = 0.8;
+    const r = (min, max) => randFrom(driftProfile, min, max);
 
-    const jitterScale = (LAYOUT.anchorJitterPercent || 0) / 100;
-    if (!jitterScale) return { ...anchor };
+    let leftPercent;
+    let topPercent;
+    let vx;
+    let vy;
 
-    const jitteredX = clamp(anchor.x + rand(-jitterScale, jitterScale), 0, 1);
-    const jitteredY = clamp(anchor.y + rand(-jitterScale, jitterScale), 0, 1);
-
-    return { ...anchor, x: jitteredX, y: jitteredY };
-}
-
-function resolveAnchorPosition(anchor, blockLayout) {
-    const layout = blockLayout || computeBlockLayout();
-    const jittered = jitterAnchor(anchor);
-    const left = jittered.x * layout.maxX;
-    const top = jittered.y * layout.maxY;
-    const topPercent = layout.height ? (top / layout.height) * 100 : 0;
-    const leftPercent = layout.width ? (left / layout.width) * 100 : 0;
-
-    return { ...jittered, top, left, topPercent, leftPercent };
-}
-
-function pickAnchor(prevAnchor = null) {
-    if (!ANCHORS.length) {
-        return { x: 0, y: 0, idx: 0 };
+    if (!prevAnchor) {
+        leftPercent = maxXRange ? r(padX, maxXRange - padX) : 0;
+        topPercent = maxYRange ? r(padY, maxYRange - padY) : 0;
+        const maxSpeedX = maxSpeed * (maxXRange / maxRange) * scaleX;
+        const maxSpeedY = maxSpeed * (maxYRange / maxRange) * scaleY;
+        vx = maxSpeedX ? r(-maxSpeedX, maxSpeedX) * 0.3 : 0;
+        vy = maxSpeedY ? r(-maxSpeedY, maxSpeedY) * 0.3 : 0;
+    } else {
+        leftPercent = prevAnchor.leftPercent ?? 0;
+        topPercent = prevAnchor.topPercent ?? 0;
+        vx = prevAnchor.vx ?? 0;
+        vy = prevAnchor.vy ?? 0;
     }
 
-    const randomAnchor = () => {
-        const idx = (Math.random() * ANCHORS.length) | 0;
-        const base = ANCHORS[idx] || { x: 0, y: 0, idx };
-        const anchor = jitterAnchor(base);
-        return { ...anchor, idx: base.idx ?? idx };
-    };
-
-    if (!prevAnchor || typeof prevAnchor !== "object") {
-        return randomAnchor();
+    if (maxXRange) {
+        const strengthX = strength * (maxXRange / maxRange) * scaleX;
+        const maxSpeedX = maxSpeed * (maxXRange / maxRange) * scaleX;
+        const noiseX = r(-strengthX, strengthX) + biasX * strengthX;
+        const kickX = (kick / 100) * maxXRange * scaleX;
+        vx = clamp((vx + noiseX) * damping, -maxSpeedX, maxSpeedX);
+        if (kickX) {
+            vx = clamp(vx + r(-kickX, kickX), -maxSpeedX, maxSpeedX);
+        }
+        const minSpeedX =
+            (Math.max(0, LAYOUT.driftMinMovePercent || 0) / 100) * maxXRange;
+        const longMinX =
+            maxXRange >= maxYRange
+                ? (Math.max(0, LAYOUT.minMoveLongAxisPercent || 0) / 100) * maxXRange
+                : 0;
+        const minVx = Math.max(minSpeedX, longMinX) * scaleX;
+        if (minVx && Math.abs(vx) < minVx) {
+            const dir = vx < 0 ? -1 : vx > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+            vx = dir * minVx;
+        }
+        leftPercent += vx;
+        const minX = padX;
+        const maxX = maxXRange - padX;
+        if (leftPercent < minX) {
+            leftPercent = clamp(minX + nudgeX, minX, maxX);
+            vx = Math.abs(vx) * 0.5;
+        } else if (leftPercent > maxX) {
+            leftPercent = clamp(maxX - nudgeX, minX, maxX);
+            vx = -Math.abs(vx) * 0.5;
+        }
+        leftPercent = clamp(leftPercent, minX, maxX);
+    } else {
+        leftPercent = 0;
+        vx = 0;
     }
 
-    const prevX = anchorSide(prevAnchor.x ?? 0);
-    const prevY = anchorSide(prevAnchor.y ?? 0);
-    const targetX = prevX === 0 ? 1 : 0;
-    const targetY = prevY === 0 ? 1 : 0;
-
-    const target =
-        ANCHORS.find((a) => a.x === targetX && a.y === targetY) || null;
-    if (!target) {
-        return randomAnchor();
+    if (maxYRange) {
+        const strengthY = strength * (maxYRange / maxRange) * scaleY;
+        const maxSpeedY = maxSpeed * (maxYRange / maxRange) * scaleY;
+        const noiseY = r(-strengthY, strengthY) + biasY * strengthY;
+        const kickY = (kick / 100) * maxYRange * scaleY;
+        vy = clamp((vy + noiseY) * damping, -maxSpeedY, maxSpeedY);
+        if (kickY) {
+            vy = clamp(vy + r(-kickY, kickY), -maxSpeedY, maxSpeedY);
+        }
+        const minSpeedY =
+            (Math.max(0, LAYOUT.driftMinMovePercent || 0) / 100) * maxYRange;
+        const longMinY =
+            maxYRange >= maxXRange
+                ? (Math.max(0, LAYOUT.minMoveLongAxisPercent || 0) / 100) * maxYRange
+                : 0;
+        const minVy = Math.max(minSpeedY, longMinY) * scaleY;
+        if (minVy && Math.abs(vy) < minVy) {
+            const dir = vy < 0 ? -1 : vy > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+            vy = dir * minVy;
+        }
+        topPercent += vy;
+        const minY = padY;
+        const maxY = maxYRange - padY;
+        if (topPercent < minY) {
+            topPercent = clamp(minY + nudgeY, minY, maxY);
+            vy = Math.abs(vy) * 0.5;
+        } else if (topPercent > maxY) {
+            topPercent = clamp(maxY - nudgeY, minY, maxY);
+            vy = -Math.abs(vy) * 0.5;
+        }
+        topPercent = clamp(topPercent, minY, maxY);
+    } else {
+        topPercent = 0;
+        vy = 0;
     }
 
-    const anchor = jitterAnchor(target);
-    return { ...anchor, idx: target.idx };
-}
+    const swapMin = Math.max(0, LAYOUT.swapMinDistancePercent || 0);
+    const swapMinAxis = Math.max(0, LAYOUT.swapMinAxisPercent || 0);
+    const swapMinLong = Math.max(0, LAYOUT.swapMinLongAxisPercent || 0);
+    if (prevAnchor && (swapMin || swapMinAxis || swapMinLong)) {
+        const prevLeft = prevAnchor.leftPercent ?? leftPercent;
+        const prevTop = prevAnchor.topPercent ?? topPercent;
+        let dx = leftPercent - prevLeft;
+        let dy = topPercent - prevTop;
+        const dist = Math.hypot(dx, dy);
+        const minDist = (swapMin / 100) * maxRange;
+        if (minDist && dist < minDist) {
+            let nx = dx;
+            let ny = dy;
+            if (dist < 0.001) {
+                const angle = r(0, Math.PI * 2);
+                nx = Math.cos(angle);
+                ny = Math.sin(angle);
+            } else {
+                nx /= dist;
+                ny /= dist;
+            }
+            const push = minDist - dist;
+            if (maxXRange) {
+                leftPercent = clamp(
+                    leftPercent + nx * push,
+                    padX,
+                    maxXRange - padX
+                );
+            }
+            if (maxYRange) {
+                topPercent = clamp(
+                    topPercent + ny * push,
+                    padY,
+                    maxYRange - padY
+                );
+            }
+            dx = leftPercent - prevLeft;
+            dy = topPercent - prevTop;
+        }
 
-function setObjectPosition(img, anchor) {
-    if (!img || !anchor) return;
-    const x = clamp((anchor.x ?? 0.5) * 100, 0, 100);
-    const y = clamp((anchor.y ?? 0.5) * 100, 0, 100);
-    img.style.objectPosition = `${x}% ${y}%`;
+        if (swapMinAxis) {
+            if (maxXRange) {
+                const minX = (swapMinAxis / 100) * maxXRange;
+                if (Math.abs(dx) < minX) {
+                    const dir =
+                        dx < 0 ? -1 : dx > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+                    leftPercent = clamp(
+                        leftPercent + dir * (minX - Math.abs(dx)),
+                        padX,
+                        maxXRange - padX
+                    );
+                }
+            }
+            if (maxYRange) {
+                const minY = (swapMinAxis / 100) * maxYRange;
+                if (Math.abs(dy) < minY) {
+                    const dir =
+                        dy < 0 ? -1 : dy > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+                    topPercent = clamp(
+                        topPercent + dir * (minY - Math.abs(dy)),
+                        padY,
+                        maxYRange - padY
+                    );
+                }
+            }
+            dx = leftPercent - prevLeft;
+            dy = topPercent - prevTop;
+        }
+
+        if (swapMinLong) {
+            if (maxXRange >= maxYRange && maxXRange) {
+                const minLong = (swapMinLong / 100) * maxXRange;
+                if (Math.abs(dx) < minLong) {
+                    const dir =
+                        dx < 0 ? -1 : dx > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+                    leftPercent = clamp(
+                        leftPercent + dir * (minLong - Math.abs(dx)),
+                        padX,
+                        maxXRange - padX
+                    );
+                }
+            } else if (maxYRange) {
+                const minLong = (swapMinLong / 100) * maxYRange;
+                if (Math.abs(dy) < minLong) {
+                    const dir =
+                        dy < 0 ? -1 : dy > 0 ? 1 : r(-1, 1) < 0 ? -1 : 1;
+                    topPercent = clamp(
+                        topPercent + dir * (minLong - Math.abs(dy)),
+                        padY,
+                        maxYRange - padY
+                    );
+                }
+            }
+        }
+    }
+
+    const left = layout.width ? (leftPercent / 100) * layout.width : 0;
+    const top = layout.height ? (topPercent / 100) * layout.height : 0;
+    const x = layout.maxX ? left / layout.maxX : 0.5;
+    const y = layout.maxY ? top / layout.maxY : 0.5;
+    return { x, y, top, left, topPercent, leftPercent, vx, vy };
 }
 
 // ===== DOM helpers =====
 
-function makeItem(src, anchor, blockLayout) {
-    // New item every time we show an image → new random x/y per swap
+function makeItem(src, blockLayout, prevAnchor = null) {
+    // New item every time we show an image → new position per swap
     const layout = blockLayout || computeBlockLayout();
-    const baseAnchor = anchor || pickAnchor();
-    const resolvedAnchor = resolveAnchorPosition(baseAnchor, layout);
+    const resolvedAnchor = computeDriftPosition(
+        layout,
+        prevAnchor,
+        blockLayout?.driftProfile || null
+    );
 
     const item = document.createElement("div");
     item.className = "about_block-item";
@@ -410,7 +603,6 @@ function makeItem(src, anchor, blockLayout) {
     img.style.width = "100%";
     img.style.height = "100%";
     img.style.display = "block";
-    setObjectPosition(img, resolvedAnchor);
 
     frame.appendChild(img);
     item.appendChild(frame);
@@ -624,9 +816,27 @@ async function swapSlotImage(slot, nextSrc, slotIndexHint) {
     const blockLayout = computeBlockLayout(slot.block);
     const { item: newItem, img: newImg, anchor } = makeItem(
         nextSrc,
-        pickAnchor(prevAnchor),
-        blockLayout
+        blockLayout,
+        prevAnchor
     );
+    if (prevAnchor && anchor) {
+        const round = (v) =>
+            typeof v === "number" ? Math.round(v * 100) / 100 : null;
+        const prevLeft = round(prevAnchor.leftPercent);
+        const prevTop = round(prevAnchor.topPercent);
+        const nextLeft = round(anchor.leftPercent);
+        const nextTop = round(anchor.topPercent);
+        const deltaLeft =
+            prevLeft != null && nextLeft != null ? round(nextLeft - prevLeft) : null;
+        const deltaTop =
+            prevTop != null && nextTop != null ? round(nextTop - prevTop) : null;
+        log(
+            "swapSlotImage: pos",
+            `slot=${slotIndexHint ?? "?"} ` +
+            `prev=(${prevLeft},${prevTop}) next=(${nextLeft},${nextTop}) ` +
+            `delta=(${deltaLeft},${deltaTop})`
+        );
+    }
     setDropPose(newItem);
     slot.block.appendChild(newItem);
 
@@ -749,8 +959,8 @@ async function changeTheme(key) {
             const blockLayout = computeBlockLayout(slot.block);
             const { item, img, anchor } = makeItem(
                 src,
-                pickAnchor(prevAnchor),
-                blockLayout
+                blockLayout,
+                prevAnchor
             );
             setDropPose(item);
             slot.block.appendChild(item);
@@ -899,11 +1109,10 @@ export function init() {
                 );
 
                 const src = initialSrcs[i % initialSrcs.length];
-                const anchor = pickAnchor();
                 const { item, img, anchor: chosenAnchor } = makeItem(
                     src,
-                    anchor,
-                    computeBlockLayout(block)
+                    computeBlockLayout(block),
+                    null
                 );
                 setDropPose(item);
                 block.style.position = "relative";
