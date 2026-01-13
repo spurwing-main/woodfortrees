@@ -283,11 +283,14 @@ function initOne(root) {
                 return;
             }
 
+            // Ensure gain starts at 0 for a proper fade-in
+            gains[activeSlot].gain.setValueAtTime(0, ctx.currentTime);
+
             playInSlot(activeSlot, buffer);
             hasEverStarted = true;
 
             fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
-            fadeGain(gains[1 - activeSlot], 0, 0.05);
+            fadeGain(gains[1 - activeSlot], 0, 0.15);
         })();
 
         try {
@@ -331,6 +334,9 @@ function initOne(root) {
             warn("audio failed to load/decode", err);
             return;
         }
+
+        // Ensure gain starts at 0 for a proper fade-in
+        gains[nextSlot].gain.setValueAtTime(0, ctx.currentTime);
 
         playInSlot(nextSlot, buffer);
 
@@ -519,12 +525,15 @@ function initOne(root) {
         setUILabel();
 
         if (gains) {
-            fadeGain(gains[0], 0, 0);
-            fadeGain(gains[1], 0, 0);
+            fadeGain(gains[0], 0, 0.1);
+            fadeGain(gains[1], 0, 0.1);
         }
 
-        stopSlotNow(0);
-        stopSlotNow(1);
+        // Delay stop to allow fade out
+        setTimeout(() => {
+            stopSlotNow(0);
+            stopSlotNow(1);
+        }, 120);
 
         if (ctx) {
             try { ctx.close(); } catch { }
