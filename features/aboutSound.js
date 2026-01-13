@@ -72,7 +72,8 @@ function initOne(root) {
     let preloadStarted = false;
 
     let wasOnBeforeHide = false;
-    let wasOnOffscreen = false;
+    let scrollMuted = false;
+    let wasMutedByScroll = false;
 
     let startPromise = null;
     const cleanupFns = [];
@@ -143,17 +144,54 @@ function initOne(root) {
     function fadeGain(gainNode, to, sec) {
         if (!ctx || !gainNode) return;
 
-        const now = ctx.currentTime;
         const g = gainNode.gain;
+        const target = clamp01(to);
 
-        if (typeof g.cancelAndHoldAtTime === "function") {
-            g.cancelAndHoldAtTime(now);
-        } else {
-            g.cancelScheduledValues(now);
-            g.setValueAtTime(g.value, now);
+        // We intentionally avoid AudioParam automation (linearRampToValueAtTime), because
+        // canceling/reversing ramps quickly can "jump" to the param's last set value
+        // in some browsers (commonly noticed when scrolling in/out rapidly).
+        //
+        // Instead, drive fades with rAF + direct value assignment so the "from" value
+        // is always the true current value we last applied.
+
+        if (!fadeGain._state) fadeGain._state = new WeakMap();
+        const state = fadeGain._state;
+
+        const prev = state.get(gainNode);
+        if (prev?.rafId) cancelAnimationFrame(prev.rafId);
+
+        // Clear any leftover automation from older code paths.
+        try {
+            const now = ctx.currentTime;
+            if (typeof g.cancelAndHoldAtTime === "function") g.cancelAndHoldAtTime(now);
+            else g.cancelScheduledValues(now);
+        } catch { }
+
+        const from = clamp01(g.value);
+        const durationMs = Math.max(0.001, sec) * 1000;
+
+        if (durationMs <= 20) {
+            g.value = target;
+            state.set(gainNode, { rafId: 0 });
+            return;
         }
 
-        g.linearRampToValueAtTime(clamp01(to), now + Math.max(0.001, sec));
+        const startMs = performance.now();
+        const tick = (nowMs) => {
+            const t = Math.min(1, (nowMs - startMs) / durationMs);
+            g.value = from + (target - from) * t;
+
+            if (t >= 1) {
+                state.set(gainNode, { rafId: 0 });
+                return;
+            }
+
+            const rafId = requestAnimationFrame(tick);
+            state.set(gainNode, { rafId });
+        };
+
+        const rafId = requestAnimationFrame(tick);
+        state.set(gainNode, { rafId });
     }
 
     async function ensureAudioRunning() {
@@ -255,8 +293,11 @@ function initOne(root) {
 
         if (!ctx || !gains) return;
 
+        const targetVol = scrollMuted || document.hidden ? 0 : effectiveTargetVol;
+        if (scrollMuted) wasMutedByScroll = true;
+
         if (isOn && sources[activeSlot]) {
-            fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
+            fadeGain(gains[activeSlot], targetVol, fadeSec);
             return;
         }
 
@@ -284,12 +325,12 @@ function initOne(root) {
             }
 
             // Ensure gain starts at 0 for a proper fade-in
-            gains[activeSlot].gain.setValueAtTime(0, ctx.currentTime);
+            gains[activeSlot].gain.value = 0;
 
             playInSlot(activeSlot, buffer);
             hasEverStarted = true;
 
-            fadeGain(gains[activeSlot], effectiveTargetVol, fadeSec);
+            fadeGain(gains[activeSlot], targetVol, fadeSec);
             fadeGain(gains[1 - activeSlot], 0, 0.15);
         })();
 
@@ -308,6 +349,13 @@ function initOne(root) {
         if (!ctx || !gains) {
             stopSlotNow(0);
             stopSlotNow(1);
+            return;
+        }
+
+        // If the document is hidden, rAF may be throttled/paused; ensure we mute immediately.
+        if (document.hidden) {
+            gains[0].gain.value = 0;
+            gains[1].gain.value = 0;
             return;
         }
 
@@ -336,11 +384,12 @@ function initOne(root) {
         }
 
         // Ensure gain starts at 0 for a proper fade-in
-        gains[nextSlot].gain.setValueAtTime(0, ctx.currentTime);
+        gains[nextSlot].gain.value = 0;
 
         playInSlot(nextSlot, buffer);
 
-        fadeGain(gains[nextSlot], effectiveTargetVol, sec);
+        const targetVol = scrollMuted || document.hidden ? 0 : effectiveTargetVol;
+        fadeGain(gains[nextSlot], targetVol, sec);
         fadeGain(gains[activeSlot], 0, sec);
 
         // stop old slot after fade
@@ -443,29 +492,58 @@ function initOne(root) {
         () => document.removeEventListener("visibilitychange", onVisibilityChange)
     );
 
-    const observer = new IntersectionObserver(
-        (entries) => {
-            const entry = entries[0];
-            if (!entry) return;
+    // Mute after scrolling 100vh down the page (independent of this element's visibility).
+    let scrollRafId = 0;
+    const getScrollY = () => {
+        try {
+            return Number(window.scrollY ?? window.pageYOffset ?? 0) || 0;
+        } catch {
+            return 0;
+        }
+    };
+    const getVh = () => {
+        try {
+            return Number(window.innerHeight) || 0;
+        } catch {
+            return 0;
+        }
+    };
+    const computeScrollMuted = () => getScrollY() >= getVh();
 
-            if (entry.isIntersecting) {
-                if (wasOnOffscreen) {
-                    wasOnOffscreen = false;
-                    if (desiredOn) turnOn({ fadeSec: CONFIG.crossfadeSec });
-                }
-                return;
-            }
+    const syncScrollMute = () => {
+        scrollRafId = 0;
 
-            if (isOn) {
-                wasOnOffscreen = true;
+        const nextMuted = computeScrollMuted();
+        if (nextMuted === scrollMuted) return;
+
+        scrollMuted = nextMuted;
+
+        if (scrollMuted) {
+            if (desiredOn || isOn) {
+                wasMutedByScroll = true;
                 turnOff({ fadeSec: CONFIG.crossfadeSec, keepDesired: true });
             }
-        },
-        { threshold: 0.05, rootMargin: "100% 0px 0px 0px" }
-    );
+            return;
+        }
 
-    observer.observe(root);
-    cleanupFns.push(() => observer.disconnect());
+        if (wasMutedByScroll) {
+            wasMutedByScroll = false;
+            if (desiredOn) turnOn({ fadeSec: CONFIG.crossfadeSec });
+        }
+    };
+
+    const scheduleScrollMuteSync = () => {
+        if (scrollRafId) return;
+        scrollRafId = requestAnimationFrame(syncScrollMute);
+    };
+
+    window.addEventListener("scroll", scheduleScrollMuteSync, { passive: true });
+    window.addEventListener("resize", scheduleScrollMuteSync, { passive: true });
+    cleanupFns.push(
+        () => window.removeEventListener("scroll", scheduleScrollMuteSync),
+        () => window.removeEventListener("resize", scheduleScrollMuteSync),
+        () => scrollRafId && cancelAnimationFrame(scrollRafId)
+    );
 
     const triggerEls = Array.from(document.querySelectorAll("[data-audio-trigger]"));
     for (const el of triggerEls) el.addEventListener("click", onTriggerClick);
@@ -503,6 +581,11 @@ function initOne(root) {
     isOn = false;
     currentUrl = defaultUrl;
     setUILabel();
+    // Ensure initial scroll-muted state is correct.
+    try {
+        scrollMuted = (Number(window.scrollY ?? window.pageYOffset ?? 0) || 0) >=
+            (Number(window.innerHeight) || 0);
+    } catch { }
 
     root.ambientSound = {
         on: () => turnOn(),
